@@ -1,19 +1,23 @@
 /*
- * Template for experimental AHB_Sort variants. Include it once per variant,
- * after "ahb_sort.h", with these macros defined (all are #undef'd at the end):
+ * Template for experimental AHB_Sort variants. Include it once per variant
+ * with these macros defined (all are #undef'd at the end). The including file
+ * must provide ahbv_insertion_sort, ahbv_compare_ints and ahbv_clamp_index.
  *
- *   AHB_FN            name of the generated function (required)
- *   AHB_OPT_COUNTING  0 = off; C > 0 = plain counting sort when
- *                     range <= size * C / 4
- *   AHB_OPT_POW2      0 = bucket index by multiply (the old behaviour);
- *                     1 = power-of-two bucket width, rounded up (shift);
- *                     2 = power-of-two bucket width, rounded down (shift)
- *   AHB_OPT_DIVISOR   0 = variance-based bucket count (the old behaviour);
- *                     K > 0 = bucket count is size / K, no variance pass
+ *   AHB_FN              name of the generated function (required)
+ *   AHB_OPT_COUNTING    0 = off; C > 0 = plain counting sort when
+ *                       range <= size * C / 4
+ *   AHB_OPT_POW2        0 = bucket index by multiply;
+ *                       1 = power-of-two bucket width, rounded up (shift);
+ *                       2 = power-of-two bucket width, rounded down (shift)
+ *   AHB_OPT_DIVISOR     0 = variance-based bucket count;
+ *                       K > 0 = bucket count is size / K, no variance pass
+ *   AHB_OPT_MAX_BUCKETS 0 = no limit; M > 0 = at most M buckets per level
+ *   AHB_OPT_SHARED      0 = every recursion level allocates its own scratch;
+ *                       1 = one scratch buffer for the whole sort (a level
+ *                       sorting a bucket uses the matching part of the
+ *                       caller's array as its scratch)
  *
- * With every option at 0 the generated code is the algorithm as it was before
- * these options were adopted. ahb_sort.h now corresponds to
- * COUNTING 8, POW2 1, DIVISOR 2.
+ * With every option at 0 the generated code is the original algorithm.
  */
 
 #ifndef AHB_FN
@@ -28,6 +32,16 @@
 #ifndef AHB_OPT_DIVISOR
 #define AHB_OPT_DIVISOR 0
 #endif
+#ifndef AHB_OPT_MAX_BUCKETS
+#define AHB_OPT_MAX_BUCKETS 0
+#endif
+#ifndef AHB_OPT_SHARED
+#define AHB_OPT_SHARED 0
+#endif
+
+#define AHBV_CAT2(a, b) a##b
+#define AHBV_CAT(a, b) AHBV_CAT2(a, b)
+#define AHBV_REC AHBV_CAT(AHB_FN, _rec)
 
 #if AHB_OPT_POW2
 #define AHBV_INDEX(x) ((int)(((uint32_t)(x) - min_u) >> shift))
@@ -35,10 +49,12 @@
 #define AHBV_INDEX(x) ahbv_clamp_index((int)(((uint32_t)(x) - min_u) * bucket_size_inv), bucket_count)
 #endif
 
-static void AHB_FN(int *arr, int size) {
+// Sorts arr in place. scratch is NULL or a buffer of at least size ints.
+static void AHBV_REC(int *arr, int *scratch, int size) {
+    (void)scratch;
     if (size <= 1) return;
     if (size <= 16) {
-        insertion_sort(arr, size);
+        ahbv_insertion_sort(arr, size);
         return;
     }
 
@@ -100,6 +116,9 @@ static void AHB_FN(int *arr, int size) {
     int bucket_count = size / AHB_OPT_DIVISOR;
 #endif
     bucket_count = bucket_count < 2 ? 2 : bucket_count;
+#if AHB_OPT_MAX_BUCKETS
+    if (bucket_count > AHB_OPT_MAX_BUCKETS) bucket_count = AHB_OPT_MAX_BUCKETS;
+#endif
 
     const uint32_t min_u = (uint32_t)min_value;
 
@@ -135,15 +154,31 @@ static void AHB_FN(int *arr, int size) {
     const double bucket_size_inv = 1.0 / (double)bucket_size;
 #endif
 
+#if AHB_OPT_SHARED
+    int owns_scratch = 0;
+    if (!scratch) {
+        scratch = malloc(size * sizeof(int));
+        owns_scratch = 1;
+    }
+    int *bucket_data = malloc(bucket_count * sizeof(int) * 3);
+    if (!scratch || !bucket_data) {
+        if (owns_scratch) free(scratch);
+        free(bucket_data);
+        qsort(arr, size, sizeof(int), ahbv_compare_ints);
+        return;
+    }
+    int *buckets = scratch;
+#else
     size_t total_size = size * sizeof(int) + bucket_count * sizeof(int) * 3;
     char *memory = malloc(total_size);
     if (!memory) {
-        qsort(arr, size, sizeof(int), ahb_compare_ints);
+        qsort(arr, size, sizeof(int), ahbv_compare_ints);
         return;
     }
 
     int *buckets = (int*)memory;
     int *bucket_data = (int*)(buckets + size);
+#endif
     int *bucket_offsets = bucket_data;
     int *bucket_sizes = bucket_data + bucket_count;
     int *positions = bucket_data + 2 * bucket_count;
@@ -179,14 +214,27 @@ static void AHB_FN(int *arr, int size) {
 
         int *bucket = &buckets[bucket_offsets[i]];
         if (bsize > threshold) {
-            AHB_FN(bucket, bsize);
+#if AHB_OPT_SHARED
+            AHBV_REC(bucket, arr + bucket_offsets[i], bsize);
+#else
+            AHBV_REC(bucket, NULL, bsize);
+#endif
         } else {
-            insertion_sort(bucket, bsize);
+            ahbv_insertion_sort(bucket, bsize);
         }
     }
 
     memcpy(arr, buckets, size * sizeof(int));
+#if AHB_OPT_SHARED
+    free(bucket_data);
+    if (owns_scratch) free(scratch);
+#else
     free(memory);
+#endif
+}
+
+static void AHB_FN(int *arr, int size) {
+    AHBV_REC(arr, NULL, size);
 }
 
 #undef AHBV_INDEX
@@ -194,3 +242,8 @@ static void AHB_FN(int *arr, int size) {
 #undef AHB_OPT_COUNTING
 #undef AHB_OPT_POW2
 #undef AHB_OPT_DIVISOR
+#undef AHB_OPT_MAX_BUCKETS
+#undef AHB_OPT_SHARED
+#undef AHBV_REC
+#undef AHBV_CAT
+#undef AHBV_CAT2

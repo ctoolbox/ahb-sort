@@ -1,6 +1,6 @@
 # AHB Sort: An Optimized Bucket Sort Implementation 🚀
 
-A pet project focused on optimizing the classic bucket sort algorithm through various techniques and improvements. The result is AHB (Adaptive Hybrid Bucket) Sort, a sort for `int` arrays that is much faster than the C library's `qsort` and about twice as fast as the bucket sort it started from.
+A pet project focused on optimizing the classic bucket sort algorithm through various techniques and improvements. The result is AHB (Adaptive Hybrid Bucket) Sort, a sort for integer arrays that is much faster than the C library's `qsort` and about twice as fast as the bucket sort it started from.
 
 ## Performance Highlights 📊
 
@@ -48,6 +48,30 @@ Geometric mean speedup of AHB Sort over the 6 input patterns:
 | 1,000,000 | 2.4x | 14.1x | 1.5x |
 | 5,000,000 | 2.4x | 14.1x | 1.6x |
 
+## 64-bit Elements 📏
+
+The tables above are for 32-bit elements (`int`). The same benchmark with `int64_t` elements, over 10 input patterns (the six above plus four that need more than 32 bits), gives a geometric mean of:
+
+- 10.5x faster than `qsort`
+- 1.9x faster than an eight-pass byte-wise radix sort
+
+At 5M elements (best of 7 runs, in milliseconds):
+
+| Input | AHB Sort | `qsort` | Radix (base 256) | vs `qsort` | vs radix |
+|---|---|---|---|---|---|
+| Random, range 1000 | 2.88 | 174.51 | 21.41 | 60.6x | 7.4x |
+| Random, range 1e9 | 47.42 | 425.42 | 21.94 | 9.0x | 0.46x |
+| Nearly sorted | 22.94 | 169.29 | 43.06 | 7.4x | 1.9x |
+| 100 distinct values | 8.61 | 108.56 | 42.53 | 12.6x | 4.9x |
+| Exponential | 52.31 | 399.29 | 21.38 | 7.6x | 0.41x |
+| Cluster + 1% outliers | 23.82 | 177.34 | 40.42 | 7.4x | 1.7x |
+| Random, range 1e18 | 46.77 | 426.46 | 30.69 | 9.1x | 0.66x |
+| Random, full 64-bit | 50.17 | 427.06 | 30.23 | 8.5x | 0.60x |
+| 100 distinct over 1e18 | 8.29 | 128.25 | 77.76 | 15.5x | 9.4x |
+| Exponential, scale 1e15 | 53.11 | 427.95 | 30.09 | 8.1x | 0.57x |
+
+At 5M elements AHB Sort is 2% to 17% slower than on the same values stored as 32-bit data, except on the narrow-range input, where it is about 70% slower (2.88 ms against 1.68 ms). The pattern is the same: it wins on narrow, clustered and repetitive data and loses to radix sort on wide, evenly spread data, though by less than at 32 bits because radix needs more passes.
+
 ## Performance Summary 🎯
 
 1. **Where it shines**
@@ -59,7 +83,8 @@ Geometric mean speedup of AHB Sort over the 6 input patterns:
 
 3. **Caveats**
    - `qsort` calls its comparator through a function pointer, so it is a slow baseline; an inlined comparison sort would be closer
-   - The inputs are all non-negative and at most 1e9, because the original bucket sort baseline cannot handle wider ranges. AHB Sort itself handles the full `int` range, and the tests cover it.
+   - The benchmark sorts `int` arrays whose values are all non-negative and at most 1e9, because the original bucket sort baseline cannot handle wider ranges. AHB Sort itself handles the full range of every supported type, and the tests cover it.
+   - The bucket count and the counting threshold were tuned on 32-bit data only; the 64-bit variants use the same settings.
 
 ## How It Works 🔍
 
@@ -93,7 +118,7 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
 
 ### 2. Range Handling
 - Integer-only min/max pass
-- 64-bit range and unsigned offsets, so any spread of `int` values is safe
+- Unsigned offsets from the minimum, so any spread of values is safe, up to the full range of the type
 - Counting sort when the range is narrow
 
 ### 3. Memory Management
@@ -112,17 +137,30 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
 ## Implementation Details 🛠️
 
 - Single header, C99, no dependencies beyond the standard library
-- Sorts `int` arrays in ascending order
-- Uses O(n) extra memory
-- Not a stable sort (irrelevant for plain integers)
+- Sorts 32-bit and 64-bit integers, signed and unsigned, in ascending order
+- Uses O(n) extra memory; if it cannot be allocated, falls back to `qsort`
+- Arrays of more than `UINT32_MAX` elements are handed to `qsort`
+- Sorts plain integers only, not records with a key
+- All functions are `static`, and every name is prefixed with `ahb_` or `AHB_`
 
 ## Usage
 ```c
 #include "ahb_sort.h"
 
-// Sort an integer array
-void AHB_Sort(int *arr, int size);
+void ahb_sort_i32(int32_t  *arr, size_t count);
+void ahb_sort_u32(uint32_t *arr, size_t count);
+void ahb_sort_i64(int64_t  *arr, size_t count);
+void ahb_sort_u64(uint64_t *arr, size_t count);
 ```
+
+For example:
+
+```c
+int32_t values[] = {5, -3, 2147483647, 0, -2147483648};
+ahb_sort_i32(values, 5);
+```
+
+The original `AHB_Sort(int *arr, int size)` still works and calls `ahb_sort_i32`.
 
 ## Building and Testing
 
@@ -135,8 +173,8 @@ make variants   # timing comparison of experimental variants (see experiments/)
 ## Future Improvements 🔮
 
 Potential areas for further optimization:
-- Fewer buckets per level, to close the gap to radix sort on wide ranges
-- One scratch buffer shared across the recursion
+- Closing the gap to radix sort on wide ranges. Capping the buckets per level and sharing one scratch buffer across the recursion were both tried in `experiments/` and did not help.
+- Sorting records by an integer key
 - SIMD operations integration
 - Parallel processing support
 
@@ -146,7 +184,7 @@ Feel free to experiment with the code and submit improvements. This is a learnin
 
 ## License
 
-Open source - feel free to use and modify.
+MIT - see [LICENSE](LICENSE).
 
 ---
 

@@ -20,58 +20,113 @@ static inline int ahbv_clamp_index(int index, int bucket_count) {
     return index >= bucket_count ? bucket_count - 1 : index;
 }
 
+static inline void ahbv_insertion_sort(int *arr, int size) {
+    for (int i = 1; i < size; i++) {
+        int key = arr[i];
+        int j = i - 1;
+        while (j >= 0 && arr[j] > key) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
+}
+
+static int ahbv_compare_ints(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
 // ---- Variants --------------------------------------------------------------
+//
+// "original" is the algorithm before any of the template's options existed.
+// "current" is the algorithm in ahb_sort.h expressed through the template:
+// counting when range <= 2n, power-of-two widths, n / 2 buckets.
 
-#define AHB_FN v_count4
-#define AHB_OPT_COUNTING 4
+#define AHB_FN v_original
 #include "ahb_variant.inc"
 
-#define AHB_FN v_count8
-#define AHB_OPT_COUNTING 8
-#include "ahb_variant.inc"
-
-#define AHB_FN v_pow2up
-#define AHB_OPT_POW2 1
-#include "ahb_variant.inc"
-
-#define AHB_FN v_div2
-#define AHB_OPT_DIVISOR 2
-#include "ahb_variant.inc"
-
-#define AHB_FN v_c8_p2up
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#include "ahb_variant.inc"
-
-#define AHB_FN v_c8_p2dn
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 2
-#include "ahb_variant.inc"
-
-#define AHB_FN v_c8_div2
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_DIVISOR 2
-#include "ahb_variant.inc"
-
-#define AHB_FN v_c8_up_d2
+#define AHB_FN v_current
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
 #include "ahb_variant.inc"
 
-#define AHB_FN v_c8_dn_d2
+#define AHB_FN v_cap256
 #define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 2
+#define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 256
 #include "ahb_variant.inc"
 
-#define AHB_FN v_c8_dn_d4
+#define AHB_FN v_cap1k
 #define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 2
-#define AHB_OPT_DIVISOR 4
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 1024
 #include "ahb_variant.inc"
 
-static void shipped(int *arr, int size) { AHB_Sort(arr, size); }
+#define AHB_FN v_cap4k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 4096
+#include "ahb_variant.inc"
+
+#define AHB_FN v_cap16k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 16384
+#include "ahb_variant.inc"
+
+#define AHB_FN v_cap64k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 65536
+#include "ahb_variant.inc"
+
+#define AHB_FN v_shared
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_SHARED 1
+#include "ahb_variant.inc"
+
+#define AHB_FN v_sh_256
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 256
+#define AHB_OPT_SHARED 1
+#include "ahb_variant.inc"
+
+#define AHB_FN v_sh_1k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 1024
+#define AHB_OPT_SHARED 1
+#include "ahb_variant.inc"
+
+#define AHB_FN v_sh_4k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 4096
+#define AHB_OPT_SHARED 1
+#include "ahb_variant.inc"
+
+#define AHB_FN v_sh_16k
+#define AHB_OPT_COUNTING 8
+#define AHB_OPT_POW2 1
+#define AHB_OPT_DIVISOR 2
+#define AHB_OPT_MAX_BUCKETS 16384
+#define AHB_OPT_SHARED 1
+#include "ahb_variant.inc"
+
+static void header(int *arr, int size) { AHB_Sort(arr, size); }
 
 typedef void (*sort_fn)(int *, int);
 
@@ -80,17 +135,19 @@ static const struct {
     const char *name;
     sort_fn sort;
 } variants[] = {
-    {"shipped", shipped},
-    {"count4", v_count4},
-    {"count8", v_count8},
-    {"pow2up", v_pow2up},
-    {"div2", v_div2},
-    {"c8_p2up", v_c8_p2up},
-    {"c8_p2dn", v_c8_p2dn},
-    {"c8_div2", v_c8_div2},
-    {"c8_up_d2", v_c8_up_d2},
-    {"c8_dn_d2", v_c8_dn_d2},
-    {"c8_dn_d4", v_c8_dn_d4},
+    {"header", header},
+    {"original", v_original},
+    {"current", v_current},
+    {"cap256", v_cap256},
+    {"cap1k", v_cap1k},
+    {"cap4k", v_cap4k},
+    {"cap16k", v_cap16k},
+    {"cap64k", v_cap64k},
+    {"shared", v_shared},
+    {"sh_256", v_sh_256},
+    {"sh_1k", v_sh_1k},
+    {"sh_4k", v_sh_4k},
+    {"sh_16k", v_sh_16k},
 };
 #define VARIANT_COUNT ((int)(sizeof(variants) / sizeof(variants[0])))
 
