@@ -16,6 +16,7 @@
 #include <time.h>
 #include "../ahb_sort.h"
 
+// Only used by variants without power-of-two bucket widths
 static inline int ahbv_clamp_index(int index, int bucket_count) {
     return index >= bucket_count ? bucket_count - 1 : index;
 }
@@ -39,12 +40,8 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 
 // ---- Variants --------------------------------------------------------------
 //
-// "original" is the algorithm before any of the template's options existed.
 // "current" is the algorithm in ahb_sort.h expressed through the template:
 // counting when range <= 2n, power-of-two widths, n / 2 buckets.
-
-#define AHB_FN v_original
-#include "ahb_variant.inc"
 
 #define AHB_FN v_current
 #define AHB_OPT_COUNTING 8
@@ -52,78 +49,73 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_DIVISOR 2
 #include "ahb_variant.inc"
 
-#define AHB_FN v_cap256
+#define AHB_FN v_compact
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 256
+#define AHB_OPT_COMPACT 1
 #include "ahb_variant.inc"
 
-#define AHB_FN v_cap1k
+#define AHB_FN v_a64_x2
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 1024
+#define AHB_OPT_DIVISOR 1
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_BUCKET_MULT 2
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_cap4k
+#define AHB_FN v_s1_a64
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 4096
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_SAMPLE 1
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_cap16k
+#define AHB_FN v_s2_a64
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 16384
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_SAMPLE 2
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_cap64k
+#define AHB_FN v_s2_a16
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 65536
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_SAMPLE 2
+#define AHB_OPT_FINAL_PASS 16
 #include "ahb_variant.inc"
 
-#define AHB_FN v_shared
+#define AHB_FN v_s3_a64
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_SHARED 1
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_SAMPLE 3
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_sh_256
+#define AHB_FN v_s4_a64
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 256
-#define AHB_OPT_SHARED 1
+#define AHB_OPT_COMPACT 1
+#define AHB_OPT_SAMPLE 4
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_sh_1k
+#define AHB_FN v_s2_3arr
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 1024
-#define AHB_OPT_SHARED 1
-#include "ahb_variant.inc"
-
-#define AHB_FN v_sh_4k
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 4096
-#define AHB_OPT_SHARED 1
-#include "ahb_variant.inc"
-
-#define AHB_FN v_sh_16k
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
-#define AHB_OPT_MAX_BUCKETS 16384
-#define AHB_OPT_SHARED 1
+#define AHB_OPT_SAMPLE 2
+#define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
 static void header(int *arr, int size) { AHB_Sort(arr, size); }
@@ -136,18 +128,15 @@ static const struct {
     sort_fn sort;
 } variants[] = {
     {"header", header},
-    {"original", v_original},
     {"current", v_current},
-    {"cap256", v_cap256},
-    {"cap1k", v_cap1k},
-    {"cap4k", v_cap4k},
-    {"cap16k", v_cap16k},
-    {"cap64k", v_cap64k},
-    {"shared", v_shared},
-    {"sh_256", v_sh_256},
-    {"sh_1k", v_sh_1k},
-    {"sh_4k", v_sh_4k},
-    {"sh_16k", v_sh_16k},
+    {"compact", v_compact},
+    {"a64_x2", v_a64_x2},
+    {"s1_a64", v_s1_a64},
+    {"s2_a64", v_s2_a64},
+    {"s2_a16", v_s2_a16},
+    {"s3_a64", v_s3_a64},
+    {"s4_a64", v_s4_a64},
+    {"s2_3arr", v_s2_3arr},
 };
 #define VARIANT_COUNT ((int)(sizeof(variants) / sizeof(variants[0])))
 
@@ -231,8 +220,11 @@ static int compare_ints(const void *a, const void *b) {
 static int failures = 0;
 
 static void measure(int input, int size, int rounds, double best[VARIANT_COUNT]) {
+    // Small arrays sort faster than the clock can resolve, so several copies
+    // are sorted back to back inside one timed region.
+    int copies = 200000 / size < 1 ? 1 : 200000 / size;
     size_t bytes = (size_t)size * sizeof(int);
-    int *source = malloc(bytes), *expected = malloc(bytes), *work = malloc(bytes);
+    int *source = malloc(bytes), *expected = malloc(bytes), *work = malloc(bytes * copies);
     if (!source || !expected || !work) {
         fprintf(stderr, "out of memory\n");
         exit(2);
@@ -247,10 +239,10 @@ static void measure(int input, int size, int rounds, double best[VARIANT_COUNT])
 
     for (int round = 0; round < rounds; round++) {
         for (int v = 0; v < VARIANT_COUNT; v++) {
-            memcpy(work, source, bytes);
+            for (int c = 0; c < copies; c++) memcpy(work + (size_t)c * size, source, bytes);
             double start = now_ms();
-            variants[v].sort(work, size);
-            double elapsed = now_ms() - start;
+            for (int c = 0; c < copies; c++) variants[v].sort(work + (size_t)c * size, size);
+            double elapsed = (now_ms() - start) / copies;
             if (elapsed < best[v]) best[v] = elapsed;
 
             if (round == 0 && memcmp(work, expected, bytes) != 0) {
@@ -267,7 +259,7 @@ static void measure(int input, int size, int rounds, double best[VARIANT_COUNT])
 
 static void run_size(int size) {
     // More rounds for small arrays, where each run is short and noisier
-    int rounds = size >= 1000000 ? 15 : size >= 100000 ? 41 : 201;
+    int rounds = size >= 1000000 ? 15 : 41;
     double product[VARIANT_COUNT];
     for (int v = 0; v < VARIANT_COUNT; v++) product[v] = 1.0;
 

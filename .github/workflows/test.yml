@@ -1,0 +1,20 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests with sanitizers
+        run: make test CC=${{ matrix.cc }}
+      - name: Build the benchmark and the variant harness
+        run: make release release/variant_bench CC=${{ matrix.cc }}

@@ -16,8 +16,27 @@
  *                       1 = one scratch buffer for the whole sort (a level
  *                       sorting a bucket uses the matching part of the
  *                       caller's array as its scratch)
+ *   AHB_OPT_BUCKET_MULT with AHB_OPT_DIVISOR = K: bucket count is
+ *                       size * MULT / K (default 1)
+ *   AHB_OPT_THRESHOLD   buckets larger than this are sorted recursively,
+ *                       smaller ones by insertion sort (default 64; arrays
+ *                       under 1024 elements always use size / 16)
+ *   AHB_OPT_FINAL_PASS  0 = insertion-sort each small bucket separately;
+ *                       1 = sort only the large buckets, then finish with a
+ *                       single insertion-sort pass over the whole array;
+ *                       M > 1 = do that only when the largest bucket holds
+ *                       at most M elements
+ *   AHB_OPT_SAMPLE      0 = off; K > 0 = look at 64 evenly spaced elements
+ *                       first. If they are all different and spread evenly
+ *                       over the range, use size * K buckets and allow the
+ *                       final pass (AHB_OPT_FINAL_PASS = M, required);
+ *                       otherwise use the normal bucket count and no final
+ *                       pass
+ *   AHB_OPT_COMPACT     0 = three bookkeeping arrays per level (offsets,
+ *                       sizes, write positions); 1 = a single array
  *
- * With every option at 0 the generated code is the original algorithm.
+ * With every option at its default the generated code is the original
+ * algorithm.
  */
 
 #ifndef AHB_FN
@@ -37,6 +56,27 @@
 #endif
 #ifndef AHB_OPT_SHARED
 #define AHB_OPT_SHARED 0
+#endif
+#ifndef AHB_OPT_BUCKET_MULT
+#define AHB_OPT_BUCKET_MULT 1
+#endif
+#ifndef AHB_OPT_THRESHOLD
+#define AHB_OPT_THRESHOLD 64
+#endif
+#ifndef AHB_OPT_FINAL_PASS
+#define AHB_OPT_FINAL_PASS 0
+#endif
+#ifndef AHB_OPT_COMPACT
+#define AHB_OPT_COMPACT 0
+#endif
+#ifndef AHB_OPT_SAMPLE
+#define AHB_OPT_SAMPLE 0
+#endif
+
+#if AHB_OPT_COMPACT
+#define AHBV_ARRAYS 1
+#else
+#define AHBV_ARRAYS 3
 #endif
 
 #define AHBV_CAT2(a, b) a##b
@@ -113,7 +153,7 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
         min_value = val < min_value ? val : min_value;
     }
     int64_t range = (int64_t)max_value - (int64_t)min_value + 1;
-    int bucket_count = size / AHB_OPT_DIVISOR;
+    int bucket_count = (int)((int64_t)size * AHB_OPT_BUCKET_MULT / AHB_OPT_DIVISOR);
 #endif
     bucket_count = bucket_count < 2 ? 2 : bucket_count;
 #if AHB_OPT_MAX_BUCKETS
@@ -139,6 +179,33 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
     }
 #endif
 
+#if AHB_OPT_SAMPLE
+    // Decide from a small sample whether the values are spread out evenly.
+    int spread = 0;
+    if (size >= 1024) {
+        int sample[64];
+        int bins[8] = {0};
+        int step = size / 64;
+        for (int k = 0; k < 64; k++) {
+            int value = arr[k * step];
+            sample[k] = value;
+            bins[(int)(((uint64_t)((uint32_t)value - min_u) * 8) / (uint64_t)range)]++;
+        }
+        ahbv_insertion_sort(sample, 64);
+        spread = 1;
+        for (int k = 1; k < 64; k++) {
+            if (sample[k] == sample[k - 1]) spread = 0;
+        }
+        for (int k = 0; k < 8; k++) {
+            if (bins[k] < 3) spread = 0;
+        }
+    }
+    if (spread) {
+        int64_t wanted = (int64_t)size * AHB_OPT_SAMPLE;
+        bucket_count = wanted > INT32_MAX / 2 ? INT32_MAX / 2 : (int)wanted;
+    }
+#endif
+
     int64_t bucket_size = (range - 1) / bucket_count + 1;
 
 #if AHB_OPT_POW2
@@ -160,7 +227,7 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
         scratch = malloc(size * sizeof(int));
         owns_scratch = 1;
     }
-    int *bucket_data = malloc(bucket_count * sizeof(int) * 3);
+    int *bucket_data = malloc(bucket_count * sizeof(int) * AHBV_ARRAYS);
     if (!scratch || !bucket_data) {
         if (owns_scratch) free(scratch);
         free(bucket_data);
@@ -169,7 +236,7 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
     }
     int *buckets = scratch;
 #else
-    size_t total_size = size * sizeof(int) + bucket_count * sizeof(int) * 3;
+    size_t total_size = size * sizeof(int) + bucket_count * sizeof(int) * AHBV_ARRAYS;
     char *memory = malloc(total_size);
     if (!memory) {
         qsort(arr, size, sizeof(int), ahbv_compare_ints);
@@ -179,11 +246,20 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
     int *buckets = (int*)memory;
     int *bucket_data = (int*)(buckets + size);
 #endif
+
+#if AHB_OPT_COMPACT
+    // One array: it holds the counts first, then each bucket's write position.
+    // After the scatter, positions[i] is the end of bucket i, which is also
+    // the start of bucket i + 1.
+    int *positions = bucket_data;
+    int *bucket_sizes = bucket_data;
+#else
     int *bucket_offsets = bucket_data;
     int *bucket_sizes = bucket_data + bucket_count;
     int *positions = bucket_data + 2 * bucket_count;
+#endif
 
-    memset(bucket_data, 0, bucket_count * sizeof(int) * 3);
+    memset(bucket_data, 0, bucket_count * sizeof(int) * AHBV_ARRAYS);
 
     i = 0;
     for (; i + 4 <= size; i += 4) {
@@ -198,33 +274,76 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
     }
     for (; i < size; i++) bucket_sizes[AHBV_INDEX(arr[i])]++;
 
-    int running_total = 0;
+    int running_total = 0, max_bucket = 0;
     for (i = 0; i < bucket_count; i++) {
+        int bsize = bucket_sizes[i];
+        max_bucket = bsize > max_bucket ? bsize : max_bucket;
+#if !AHB_OPT_COMPACT
         bucket_offsets[i] = running_total;
+#endif
         positions[i] = running_total;
-        running_total += bucket_sizes[i];
+        running_total += bsize;
     }
 
     for (i = 0; i < size; i++) buckets[positions[AHBV_INDEX(arr[i])]++] = arr[i];
 
-    int threshold = size < 1024 ? size / 16 : 64;
-    for (i = 0; i < bucket_count; i++) {
-        int bsize = bucket_sizes[i];
-        if (bsize <= 1) continue;
+    int threshold = size < 1024 ? size / 16 : AHB_OPT_THRESHOLD;
 
-        int *bucket = &buckets[bucket_offsets[i]];
-        if (bsize > threshold) {
-#if AHB_OPT_SHARED
-            AHBV_REC(bucket, arr + bucket_offsets[i], bsize);
+#if AHB_OPT_SAMPLE
+    const int final_pass = spread && max_bucket <= AHB_OPT_FINAL_PASS;
+#elif AHB_OPT_FINAL_PASS == 1
+    const int final_pass = 1;
+#elif AHB_OPT_FINAL_PASS > 1
+    const int final_pass = max_bucket <= AHB_OPT_FINAL_PASS;
 #else
-            AHBV_REC(bucket, NULL, bsize);
+    const int final_pass = 0;
 #endif
-        } else {
-            ahbv_insertion_sort(bucket, bsize);
+
+    // With a final pass and no bucket large enough to recurse into, there is
+    // nothing to do per bucket.
+    if (!final_pass || max_bucket > threshold) {
+        int next_start = 0;
+        (void)next_start;
+        for (i = 0; i < bucket_count; i++) {
+#if AHB_OPT_COMPACT
+            int boffset = next_start;
+            int bsize = positions[i] - next_start;
+            next_start = positions[i];
+#else
+            int boffset = bucket_offsets[i];
+            int bsize = bucket_sizes[i];
+#endif
+            if (bsize > threshold) {
+#if AHB_OPT_SHARED
+                AHBV_REC(&buckets[boffset], arr + boffset, bsize);
+#else
+                AHBV_REC(&buckets[boffset], NULL, bsize);
+#endif
+            } else if (!final_pass && bsize > 1) {
+                ahbv_insertion_sort(&buckets[boffset], bsize);
+            }
         }
     }
 
-    memcpy(arr, buckets, size * sizeof(int));
+    if (final_pass) {
+        // Buckets are already in order relative to each other, so one
+        // insertion sort over everything only ever moves elements within a
+        // small bucket. It reads from the scratch buffer and writes into arr,
+        // which also replaces the copy back.
+        arr[0] = buckets[0];
+        for (i = 1; i < size; i++) {
+            int key = buckets[i];
+            int j = i;
+            while (j > 0 && arr[j - 1] > key) {
+                arr[j] = arr[j - 1];
+                j--;
+            }
+            arr[j] = key;
+        }
+    } else {
+        memcpy(arr, buckets, size * sizeof(int));
+    }
+
 #if AHB_OPT_SHARED
     free(bucket_data);
     if (owns_scratch) free(scratch);
@@ -244,6 +363,12 @@ static void AHB_FN(int *arr, int size) {
 #undef AHB_OPT_DIVISOR
 #undef AHB_OPT_MAX_BUCKETS
 #undef AHB_OPT_SHARED
+#undef AHB_OPT_BUCKET_MULT
+#undef AHB_OPT_THRESHOLD
+#undef AHB_OPT_FINAL_PASS
+#undef AHB_OPT_COMPACT
+#undef AHB_OPT_SAMPLE
+#undef AHBV_ARRAYS
 #undef AHBV_REC
 #undef AHBV_CAT
 #undef AHBV_CAT2

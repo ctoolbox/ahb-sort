@@ -2,6 +2,9 @@
 // for all four element types.
 // Build and run with `make test` (uses AddressSanitizer + UBSan).
 //
+// Three groups of checks: fixed patterns at fixed sizes, randomly shaped
+// inputs, and runs where chosen allocations inside the sort are made to fail.
+//
 // Test inputs are generated as 64-bit offsets from the smallest value of the
 // element type. Offset order is the same as element order for every type, so
 // one set of patterns covers signed and unsigned, 32-bit and 64-bit.
@@ -11,7 +14,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// ---- Allocation hooks ------------------------------------------------------
+//
+// ahb_sort.h is compiled with malloc and calloc redirected to these hooks, so
+// a test can make chosen allocations inside the sort fail. Allocations made by
+// the sort are numbered from 0; those numbered fail_first..fail_last fail.
+
+static long allocation_index = 0;
+static long fail_first = -1, fail_last = -1;
+static long injected_failures = 0;
+
+static int allocation_should_fail(void) {
+    long index = allocation_index++;
+    if (fail_first < 0 || index < fail_first || index > fail_last) return 0;
+    injected_failures++;
+    return 1;
+}
+
+static void *hooked_malloc(size_t size) {
+    return allocation_should_fail() ? NULL : malloc(size);
+}
+
+static void *hooked_calloc(size_t count, size_t size) {
+    return allocation_should_fail() ? NULL : calloc(count, size);
+}
+
+#define malloc(size) hooked_malloc(size)
+#define calloc(count, size) hooked_calloc(count, size)
 #include "ahb_sort.h"
+#undef malloc
+#undef calloc
 
 // Deterministic xorshift generator so failures reproduce on every platform
 static uint64_t rng_state = 88172645463325252ULL;
@@ -203,6 +236,39 @@ static const struct {
     {"u64", UINT64_MAX, check_u64},
 };
 
+// ---- Randomly shaped inputs ------------------------------------------------
+
+// Random count, random width of the value range (from 1 bit to the full
+// type), a random position for that range, and sometimes only a few distinct
+// values.
+static size_t fill_random_shape(uint64_t *out, size_t capacity, uint64_t top) {
+    unsigned bits = top == UINT32_MAX ? 32 : 64;
+    size_t count = next_u64() % (capacity + 1);
+    unsigned width_bits = 1 + (unsigned)(next_u64() % bits);
+    uint64_t width_mask = width_bits == 64 ? UINT64_MAX : (((uint64_t)1 << width_bits) - 1);
+    uint64_t base = (next_u64() & top) & ~width_mask;
+
+    uint64_t palette[8];
+    for (int k = 0; k < 8; k++) palette[k] = base | (next_u64() & width_mask);
+    int few_distinct = next_u64() % 4 == 0;
+
+    for (size_t i = 0; i < count; i++) {
+        out[i] = few_distinct ? palette[next_u64() % 8] : (base | (next_u64() & width_mask));
+    }
+    return count;
+}
+
+// ---- Allocation failures ---------------------------------------------------
+
+// Patterns that between them reach the counting path, the bucket path and
+// recursion into a large bucket
+static const pattern allocation_patterns[] = {
+    pat_small_range_at_bottom,
+    pat_full_range,
+    pat_cluster_with_outlier,
+    pat_powers_of_two,
+};
+
 // AHB_Sort(int *, int) is the original entry point; check it still works,
 // including sizes that are zero or negative.
 static int check_legacy_entry_point(void) {
@@ -255,6 +321,59 @@ int main(void) {
                 free(sorted);
             }
         }
+    }
+
+    // Randomly shaped inputs
+    enum { RANDOM_CASES = 500, RANDOM_CAPACITY = 3000 };
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        for (int round = 0; round < RANDOM_CASES; round++) {
+            uint64_t offsets[RANDOM_CAPACITY], sorted[RANDOM_CAPACITY];
+            uint64_t seed = rng_state;
+            size_t count = fill_random_shape(offsets, RANDOM_CAPACITY, types[t].top);
+            memcpy(sorted, offsets, count * sizeof(uint64_t));
+            qsort(sorted, count, sizeof(uint64_t), compare_u64);
+
+            checks++;
+            if (!types[t].check(offsets, sorted, count)) {
+                failures++;
+                printf("FAIL: %s, random shape, count %zu, generator state %llu\n",
+                       types[t].name, count, (unsigned long long)seed);
+            }
+        }
+    }
+
+    // Allocation failures: the array must still end up sorted
+    enum { ALLOCATION_COUNT = 5000 };
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        for (size_t p = 0; p < sizeof(allocation_patterns) / sizeof(allocation_patterns[0]); p++) {
+            static uint64_t offsets[ALLOCATION_COUNT], sorted[ALLOCATION_COUNT];
+            allocation_patterns[p](offsets, ALLOCATION_COUNT, types[t].top);
+            memcpy(sorted, offsets, sizeof(offsets));
+            qsort(sorted, ALLOCATION_COUNT, sizeof(uint64_t), compare_u64);
+
+            for (long first = 0; first < 6; first++) {
+                for (int every_later_one = 0; every_later_one < 2; every_later_one++) {
+                    allocation_index = 0;
+                    fail_first = first;
+                    fail_last = every_later_one ? LONG_MAX : first;
+                    int ok = types[t].check(offsets, sorted, ALLOCATION_COUNT);
+                    fail_first = fail_last = -1;
+
+                    checks++;
+                    if (!ok) {
+                        failures++;
+                        printf("FAIL: %s, allocation %ld%s failing, pattern %zu\n", types[t].name,
+                               first, every_later_one ? " onwards" : "", p);
+                    }
+                }
+            }
+        }
+    }
+
+    checks++;
+    if (injected_failures == 0) {
+        failures++;
+        printf("FAIL: no allocation failure was ever injected\n");
     }
 
     checks++;
