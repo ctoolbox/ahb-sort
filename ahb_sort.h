@@ -1,174 +1,316 @@
-#ifndef AHB_SORT_H
-#define AHB_SORT_H
-
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-
 /*
  * Adaptive Hybrid Bucket Sort (AHB Sort)
  * =====================================
- * An optimized version of bucket sort that combines multiple optimization techniques
- * to achieve significant performance improvements.
+ * An optimized bucket sort for integer arrays. Single header, C99.
  *
+ *     #include "ahb_sort.h"
+ *
+ *     void ahb_sort_i32(int32_t  *arr, size_t count);
+ *     void ahb_sort_u32(uint32_t *arr, size_t count);
+ *     void ahb_sort_i64(int64_t  *arr, size_t count);
+ *     void ahb_sort_u64(uint64_t *arr, size_t count);
+ *
+ * Each sorts the array in ascending order, for any values of that type.
+ * The sort needs O(count) temporary memory; if that cannot be allocated it
+ * falls back to the C library's qsort, so the array always ends up sorted.
+ * Arrays of more than UINT32_MAX elements are also handed to qsort.
+ *
+ * AHB_Sort(int *arr, int size) is kept for existing code.
+ *
+ * Every function is static, and everything this header defines is prefixed
+ * with ahb_ or AHB_.
+ *
+ * How this file is organised: the algorithm is written once, as a template
+ * in the second half of the file. The first half includes the file itself
+ * once per element type to generate the four functions, so the file must
+ * keep the name ahb_sort.h.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
-// Helper function for small arrays
-static inline void insertion_sort(int *arr, int size) {
-    for (int i = 1; i < size; i++) {
-        int key = arr[i];
-        int j = i - 1;
-        while (j >= 0 && arr[j] > key) {
-            arr[j + 1] = arr[j];
+#ifndef AHB_SORT_TEMPLATE_PASS
+
+#ifndef AHB_SORT_H
+#define AHB_SORT_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define AHB_SORT_TEMPLATE_PASS
+#define AHB_CONCAT_(a, b) a##b
+#define AHB_CONCAT(a, b) AHB_CONCAT_(a, b)
+
+#define AHB_SUFFIX i32
+#define AHB_T int32_t
+#define AHB_U uint32_t
+#include "ahb_sort.h"
+
+#define AHB_SUFFIX u32
+#define AHB_T uint32_t
+#define AHB_U uint32_t
+#include "ahb_sort.h"
+
+#define AHB_SUFFIX i64
+#define AHB_T int64_t
+#define AHB_U uint64_t
+#include "ahb_sort.h"
+
+#define AHB_SUFFIX u64
+#define AHB_T uint64_t
+#define AHB_U uint64_t
+#include "ahb_sort.h"
+
+#undef AHB_CONCAT
+#undef AHB_CONCAT_
+#undef AHB_SORT_TEMPLATE_PASS
+
+/* AHB_Sort treats an int array as int32_t, so int must be 32 bits wide. */
+typedef char ahb_sort_requires_32_bit_int[sizeof(int) == sizeof(int32_t) ? 1 : -1];
+
+/* The original entry point, kept for existing code. */
+static inline void AHB_Sort(int *arr, int size) {
+    if (size > 1) ahb_sort_i32((int32_t *)arr, (size_t)size);
+}
+
+#endif /* AHB_SORT_H */
+
+#else /* AHB_SORT_TEMPLATE_PASS */
+
+/*
+ * Template: generates ahb_sort_<suffix> and its helpers for one element type.
+ *
+ *   AHB_SUFFIX  name suffix, e.g. i32
+ *   AHB_T       element type
+ *   AHB_U       unsigned type of the same width as AHB_T
+ */
+
+#define AHB_SORT_FN AHB_CONCAT(ahb_sort_, AHB_SUFFIX)
+#define AHB_INSERTION_FN AHB_CONCAT(ahb_insertion_sort_, AHB_SUFFIX)
+#define AHB_COMPARE_FN AHB_CONCAT(ahb_compare_, AHB_SUFFIX)
+
+/* Bucket of an element: its offset from the minimum, divided by the bucket
+ * width (a power of two). Unsigned subtraction gives the exact offset for any
+ * pair of values, including ones whose difference overflows the signed type. */
+#define AHB_BUCKET_OF(x) ((size_t)(((AHB_U)(x) - min_u) >> shift))
+
+/* Helper for small arrays */
+static inline void AHB_INSERTION_FN(AHB_T *arr, size_t count) {
+    for (size_t i = 1; i < count; i++) {
+        AHB_T key = arr[i];
+        size_t j = i;
+        while (j > 0 && arr[j - 1] > key) {
+            arr[j] = arr[j - 1];
             j--;
         }
-        arr[j + 1] = key;
+        arr[j] = key;
     }
 }
 
-// Main sorting function
-static inline void AHB_Sort(int *arr, int size) {
-    if (size <= 1) return;
-    if (size <= 16) {
-        insertion_sort(arr, size);
+/* Comparator for the qsort fallback */
+static int AHB_COMPARE_FN(const void *a, const void *b) {
+    AHB_T x = *(const AHB_T *)a, y = *(const AHB_T *)b;
+    return (x > y) - (x < y);
+}
+
+/* Main sorting function */
+static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
+    if (count <= 1) return;
+    if (count <= 16) {
+        AHB_INSERTION_FN(arr, count);
         return;
     }
 
-    // Early exit for sorted sequences
+    /* Early exit for sorted sequences */
     int is_sorted = 1;
-    for (int i = 1; i < size; i++) {
-        if (arr[i] < arr[i-1]) {
+    for (size_t i = 1; i < count; i++) {
+        if (arr[i] < arr[i - 1]) {
             is_sorted = 0;
             break;
         }
     }
     if (is_sorted) return;
 
-    #define THRESHOLD_DIVISOR 16
-
-    // Statistics gathering with loop unrolling
-    int max_value = arr[0], min_value = arr[0];
-    double sum = 0.0, sum_sq = 0.0;
-    int i = 0;
-    for (; i + 4 <= size; i += 4) {
-        int v1 = arr[i], v2 = arr[i+1], v3 = arr[i+2], v4 = arr[i+3];
-        
-        max_value = v1 > max_value ? v1 : max_value;
-        max_value = v2 > max_value ? v2 : max_value;
-        max_value = v3 > max_value ? v3 : max_value;
-        max_value = v4 > max_value ? v4 : max_value;
-        
-        min_value = v1 < min_value ? v1 : min_value;
-        min_value = v2 < min_value ? v2 : min_value;
-        min_value = v3 < min_value ? v3 : min_value;
-        min_value = v4 < min_value ? v4 : min_value;
-        
-        sum += v1 + v2 + v3 + v4;
-        sum_sq += (double)v1 * v1 + (double)v2 * v2 + 
-                  (double)v3 * v3 + (double)v4 * v4;
+    /* Bucket counters are 32-bit to keep the bookkeeping small */
+    if (count > UINT32_MAX) {
+        qsort(arr, count, sizeof(AHB_T), AHB_COMPARE_FN);
+        return;
     }
-    for (; i < size; i++) {
-        int val = arr[i];
-        if (val > max_value) max_value = val;
-        if (val < min_value) min_value = val;
-        sum += val;
-        sum_sq += (double)val * val;
+
+    /* Find the value range */
+    AHB_T max_value = arr[0], min_value = arr[0];
+    size_t i;
+    for (i = 1; i < count; i++) {
+        AHB_T val = arr[i];
+        max_value = val > max_value ? val : max_value;
+        min_value = val < min_value ? val : min_value;
     }
-    
-    // Calculate variance and bucket count
-    double mean = sum / size;
-    double variance = (sum_sq / size) - (mean * mean);
-    int range = max_value - min_value + 1;
-    int bucket_count = (int)(sqrt(variance) / range * size) + 1;
-    bucket_count = bucket_count < 2 ? 2 : bucket_count;
-    int bucket_size = range / bucket_count + 1;
 
-    // Allocate memory
-    size_t total_size = size * sizeof(int) +                
-                        bucket_count * sizeof(int) * 3;     
-    char *memory = malloc(total_size);
-    if (!memory) return;
+    /* span is (number of possible values in the range) - 1. Keeping it one
+     * short of the range means it always fits in the unsigned type.
+     * span >= 1 here: the array is unsorted, so it holds two distinct values. */
+    const AHB_U min_u = (AHB_U)min_value;
+    const AHB_U span = (AHB_U)max_value - min_u;
 
-    int *buckets = (int*)memory;
-    int *bucket_data = (int*)(buckets + size);
-    int *bucket_offsets = bucket_data;
-    int *bucket_sizes = bucket_data + bucket_count;
-    int *positions = bucket_data + 2 * bucket_count;
+    /* Narrow range (at most 2 * count possible values): count each value and
+     * write the values straight back. No scratch buffer or bucket pass. */
+    if ((uint64_t)span < 2 * (uint64_t)count) {
+        size_t range = (size_t)span + 1;
+        uint32_t *counts = (uint32_t *)calloc(range, sizeof(uint32_t));
+        if (counts) {
+            for (i = 0; i < count; i++) counts[(AHB_U)arr[i] - min_u]++;
+            AHB_T *out = arr;
+            for (size_t v = 0; v < range; v++) {
+                AHB_T value = (AHB_T)(min_u + (AHB_U)v);
+                for (uint32_t c = counts[v]; c > 0; c--) *out++ = value;
+            }
+            free(counts);
+            return;
+        }
+        /* Allocation failed: carry on with the bucket pass below */
+    }
 
-    memset(bucket_data, 0, bucket_count * sizeof(int) * 3);
+    /* Look at 64 evenly spaced elements to see whether the values are spread
+     * evenly over the range: no two samples equal, and every eighth of the
+     * range holds at least three of them. Evenly spread data gets twice as
+     * many buckets, which leaves so few elements per bucket that one
+     * insertion pass over the whole array finishes the job (see below). */
+    int spread = 0;
+    if (count >= 1024) {
+        AHB_T sample[64];
+        unsigned bins[8] = {0};
+        const size_t step = count / 64;
+        const AHB_U bin_width = span / 8 + 1;
+        for (i = 0; i < 64; i++) {
+            AHB_T value = arr[i * step];
+            sample[i] = value;
+            bins[((AHB_U)value - min_u) / bin_width]++;
+        }
+        AHB_INSERTION_FN(sample, 64);
+        spread = 1;
+        for (i = 1; i < 64; i++) {
+            if (sample[i] == sample[i - 1]) spread = 0;
+        }
+        for (i = 0; i < 8; i++) {
+            if (bins[i] < 3) spread = 0;
+        }
+    }
 
-    // Distribution phase
-    const double bucket_size_inv = 1.0 / bucket_size;
+    /* Aim for count / 2 buckets (count if the data is evenly spread), then
+     * round the bucket width up to a power of two so the bucket index is a
+     * single shift.
+     *
+     * The width starts as ceil(range / target) with target >= 2, and rounding
+     * it up to a power of two still leaves it <= span. So the minimum and
+     * maximum always land in different buckets, and every recursive call
+     * works on a strictly narrower range. */
+    const size_t target = spread ? count : count / 2;
+    AHB_U bucket_width = span / (AHB_U)target + 1;
+    unsigned shift = 0;
+    while (((AHB_U)1 << shift) < bucket_width) shift++;
+    size_t bucket_count = (size_t)(span >> shift) + 1;
+
+    /* One allocation: the scratch copy of the data, then one counter per
+     * bucket */
+    size_t data_bytes = count * sizeof(AHB_T);
+    size_t bookkeeping_bytes = bucket_count * sizeof(uint32_t);
+    char *memory = NULL;
+    if (bookkeeping_bytes <= SIZE_MAX - data_bytes) {
+        memory = (char *)malloc(data_bytes + bookkeeping_bytes);
+    }
+    if (!memory) {
+        /* No scratch space: still sort, in place */
+        qsort(arr, count, sizeof(AHB_T), AHB_COMPARE_FN);
+        return;
+    }
+
+    /* positions holds the size of each bucket first, then the place where
+     * the bucket's next element goes. Once the elements are distributed,
+     * positions[b] is the end of bucket b, which is the start of bucket
+     * b + 1. */
+    AHB_T *buckets = (AHB_T *)memory;
+    uint32_t *positions = (uint32_t *)(memory + data_bytes);
+
+    memset(positions, 0, bookkeeping_bytes);
+
+    /* Count elements per bucket */
     i = 0;
-    for (; i + 4 <= size; i += 4) {
-        int v1 = arr[i] - min_value;
-        int v2 = arr[i+1] - min_value;
-        int v3 = arr[i+2] - min_value;
-        int v4 = arr[i+3] - min_value;
+    for (; i + 4 <= count; i += 4) {
+        size_t b1 = AHB_BUCKET_OF(arr[i]);
+        size_t b2 = AHB_BUCKET_OF(arr[i + 1]);
+        size_t b3 = AHB_BUCKET_OF(arr[i + 2]);
+        size_t b4 = AHB_BUCKET_OF(arr[i + 3]);
 
-        int b1 = (int)(v1 * bucket_size_inv);
-        int b2 = (int)(v2 * bucket_size_inv);
-        int b3 = (int)(v3 * bucket_size_inv);
-        int b4 = (int)(v4 * bucket_size_inv);
-
-        b1 = b1 >= bucket_count ? bucket_count - 1 : b1;
-        b2 = b2 >= bucket_count ? bucket_count - 1 : b2;
-        b3 = b3 >= bucket_count ? bucket_count - 1 : b3;
-        b4 = b4 >= bucket_count ? bucket_count - 1 : b4;
-
-        bucket_sizes[b1]++;
-        bucket_sizes[b2]++;
-        bucket_sizes[b3]++;
-        bucket_sizes[b4]++;
+        positions[b1]++;
+        positions[b2]++;
+        positions[b3]++;
+        positions[b4]++;
     }
-    for (; i < size; i++) {
-        int val = arr[i] - min_value;
-        int bucket_index = (int)(val * bucket_size_inv);
-        bucket_index = bucket_index >= bucket_count ? bucket_count - 1 : bucket_index;
-        bucket_sizes[bucket_index]++;
+    for (; i < count; i++) {
+        positions[AHB_BUCKET_OF(arr[i])]++;
     }
 
-    // Calculate offsets
-    int running_total = 0;
+    /* Turn sizes into start offsets */
+    uint32_t running_total = 0, largest_bucket = 0;
     for (i = 0; i < bucket_count; i++) {
-        bucket_offsets[i] = running_total;
+        uint32_t bucket_size = positions[i];
+        largest_bucket = bucket_size > largest_bucket ? bucket_size : largest_bucket;
         positions[i] = running_total;
-        running_total += bucket_sizes[i];
+        running_total += bucket_size;
     }
 
-    // Distribute elements
-    i = 0;
-    for (; i + 4 <= size; i += 4) {
-        for (int j = 0; j < 4; j++) {
-            int val = arr[i+j] - min_value;
-            int bucket_index = (int)(val * bucket_size_inv);
-            bucket_index = bucket_index >= bucket_count ? bucket_count - 1 : bucket_index;
-            buckets[positions[bucket_index]++] = arr[i+j];
+    /* Distribute elements */
+    for (i = 0; i < count; i++) {
+        buckets[positions[AHB_BUCKET_OF(arr[i])]++] = arr[i];
+    }
+
+    if (spread && largest_bucket <= 64) {
+        /* Evenly spread data, and every bucket turned out small. The buckets
+         * are already in order relative to each other, so one insertion sort
+         * over everything only ever moves an element within its own bucket.
+         * That is cheaper than visiting the buckets one at a time. It reads
+         * from the scratch buffer and writes into arr, which also replaces
+         * the copy back. */
+        arr[0] = buckets[0];
+        for (i = 1; i < count; i++) {
+            AHB_T key = buckets[i];
+            size_t j = i;
+            while (j > 0 && arr[j - 1] > key) {
+                arr[j] = arr[j - 1];
+                j--;
+            }
+            arr[j] = key;
         }
-    }
-    for (; i < size; i++) {
-        int val = arr[i] - min_value;
-        int bucket_index = (int)(val * bucket_size_inv);
-        bucket_index = bucket_index >= bucket_count ? bucket_count - 1 : bucket_index;
-        buckets[positions[bucket_index]++] = arr[i];
-    }
+    } else {
+        /* Sort individual buckets */
+        size_t threshold = count < 1024 ? count / 16 : 64;
+        size_t bucket_start = 0;
+        for (i = 0; i < bucket_count; i++) {
+            size_t bucket_end = positions[i];
+            size_t bucket_size = bucket_end - bucket_start;
+            AHB_T *bucket = &buckets[bucket_start];
+            bucket_start = bucket_end;
+            if (bucket_size <= 1) continue;
 
-    // Sort individual buckets
-    int threshold = size < 1024 ? size / THRESHOLD_DIVISOR : 64;
-    for (i = 0; i < bucket_count; i++) {
-        int bsize = bucket_sizes[i];
-        if (bsize <= 1) continue;
-        
-        int *bucket = &buckets[bucket_offsets[i]];
-        if (bsize > threshold) {
-            AHB_Sort(bucket, bsize);
-        } else {
-            insertion_sort(bucket, bsize);
+            if (bucket_size > threshold) {
+                AHB_SORT_FN(bucket, bucket_size);
+            } else {
+                AHB_INSERTION_FN(bucket, bucket_size);
+            }
         }
+        memcpy(arr, buckets, data_bytes);
     }
 
-    memcpy(arr, buckets, size * sizeof(int));
     free(memory);
 }
 
-#endif // AHB_SORT_H 
+#undef AHB_BUCKET_OF
+#undef AHB_COMPARE_FN
+#undef AHB_INSERTION_FN
+#undef AHB_SORT_FN
+#undef AHB_SUFFIX
+#undef AHB_T
+#undef AHB_U
+
+#endif /* AHB_SORT_TEMPLATE_PASS */
