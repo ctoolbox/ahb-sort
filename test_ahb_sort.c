@@ -182,6 +182,40 @@ static void pat_sorted_with_swaps(uint64_t *out, size_t count, uint64_t top) {
     }
 }
 
+// Ascending runs of 4096 elements, each starting at a random value
+static void pat_sorted_runs(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t base = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (i % 4096 == 0) base = next_u64() & (top / 2);
+        out[i] = base + (i % 4096) * 16;
+    }
+}
+
+// Ascending and bunched towards the bottom of the range, with 1% of the
+// elements swapped at random
+static void pat_sorted_skewed_with_swaps(uint64_t *out, size_t count, uint64_t top) {
+    for (size_t i = 0; i < count; i++) {
+        double x = (double)(i + 1) / (double)(count + 1);
+        out[i] = (uint64_t)(x * x * x * x * (double)(top / 2));
+    }
+    for (size_t k = 0; k < count / 100; k++) {
+        size_t a = next_u64() % count, b = next_u64() % count;
+        uint64_t t = out[a];
+        out[a] = out[b];
+        out[b] = t;
+    }
+}
+
+// 200 distinct values, then 2% of unrelated values at the very end: the
+// sort's sparse path gets almost all the way through before giving up
+static void pat_late_surprise(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t values[200];
+    for (size_t i = 0; i < 200; i++) values[i] = next_u64() & top;
+    for (size_t i = 0; i < count; i++) {
+        out[i] = i < count - count / 50 ? values[next_u64() % 200] : (next_u64() & top);
+    }
+}
+
 static void pat_all_equal(uint64_t *out, size_t count, uint64_t top) {
     for (size_t i = 0; i < count; i++) out[i] = top / 2 + 43;
 }
@@ -240,6 +274,9 @@ static const struct {
     {"skewed", pat_skewed},
     {"tight cluster", pat_tight_cluster},
     {"sorted with swaps", pat_sorted_with_swaps},
+    {"sorted runs", pat_sorted_runs},
+    {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
+    {"late surprise", pat_late_surprise},
     {"already sorted", pat_sorted},
     {"reversed", pat_reversed},
     {"nearly sorted", pat_nearly_sorted},
@@ -250,9 +287,8 @@ static const struct {
 static const size_t counts[] = {0, 1, 2, 3, 15, 16, 17, 18, 19, 20, 33, 100,
                                 1000, 1023, 1024, 1025, 10000, 200000};
 
-// Large arrays switch to fewer, larger buckets (from 2^18 elements, and from
-// 2^21 for evenly spread data), so these patterns also run at sizes above
-// both limits.
+// Arrays of more than 2^21 elements switch to fewer, larger buckets, so these
+// patterns also run at sizes below and above that limit.
 static const struct {
     const char *name;
     pattern fill;
@@ -263,6 +299,9 @@ static const struct {
     {"skewed", pat_skewed},
     {"tight cluster", pat_tight_cluster},
     {"sorted with swaps", pat_sorted_with_swaps},
+    {"sorted runs", pat_sorted_runs},
+    {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
+    {"late surprise", pat_late_surprise},
     {"nearly sorted", pat_nearly_sorted},
     {"cluster hidden from sample", pat_cluster_hidden_from_sample},
     {"range == 2 * count", pat_range_twice_count},

@@ -41,13 +41,16 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 // ---- Variants --------------------------------------------------------------
 //
 // "current" is the algorithm in ahb_sort.h expressed through the template.
-// The others each differ from it in one respect:
+// The others:
 //
-//   previous  the header before sparse counting, the spread-aware counting
+//   sampled   the header before sparse counting, the spread-aware counting
 //             limit and the bucket caps were added
-//   no_caps   without the bucket caps for large arrays
-//   no_guard  caps applied even to nearly sorted and tightly clustered data
-//   wc16      with software write combining in the capped scatter
+//   no_caps   current without the bucket caps for large arrays
+//   early     the first version of the caps: from 2^18 elements for data that
+//             is not evenly spread, with weaker guards and a 1024-slot sparse
+//             table. Fast on the inputs below, but up to 3x slower than
+//             "sampled" on other shapes (two clusters, sorted runs).
+//   wc16      current with software write combining in the capped scatter
 
 #define AHB_FN v_current
 #define AHB_OPT_COUNTING 8
@@ -56,16 +59,16 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_COMPACT 1
 #define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
-#define AHB_OPT_SPARSE 1
+#define AHB_OPT_SPARSE 4096
 #define AHB_OPT_COUNT_SPREAD 1
 #define AHB_OPT_CAP_SKEW 8192
-#define AHB_OPT_CAP_SKEW_AT 262144
-#define AHB_OPT_CAP_GUARDS 1
+#define AHB_OPT_CAP_SKEW_AT 2097153
+#define AHB_OPT_CAP_GUARDS 2
 #define AHB_OPT_CAP_SPREAD_AT 2097152
 #define AHB_OPT_CAP_SPREAD_DIV 4096
 #include "ahb_variant.inc"
 
-#define AHB_FN v_previous
+#define AHB_FN v_sampled
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
@@ -81,21 +84,22 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_COMPACT 1
 #define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
-#define AHB_OPT_SPARSE 1
+#define AHB_OPT_SPARSE 4096
 #define AHB_OPT_COUNT_SPREAD 1
 #include "ahb_variant.inc"
 
-#define AHB_FN v_no_guard
+#define AHB_FN v_early
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
 #define AHB_OPT_COMPACT 1
 #define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
-#define AHB_OPT_SPARSE 1
+#define AHB_OPT_SPARSE 1024
 #define AHB_OPT_COUNT_SPREAD 1
 #define AHB_OPT_CAP_SKEW 8192
 #define AHB_OPT_CAP_SKEW_AT 262144
+#define AHB_OPT_CAP_GUARDS 1
 #define AHB_OPT_CAP_SPREAD_AT 2097152
 #define AHB_OPT_CAP_SPREAD_DIV 4096
 #include "ahb_variant.inc"
@@ -107,11 +111,11 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_COMPACT 1
 #define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
-#define AHB_OPT_SPARSE 1
+#define AHB_OPT_SPARSE 4096
 #define AHB_OPT_COUNT_SPREAD 1
 #define AHB_OPT_CAP_SKEW 8192
-#define AHB_OPT_CAP_SKEW_AT 262144
-#define AHB_OPT_CAP_GUARDS 1
+#define AHB_OPT_CAP_SKEW_AT 2097153
+#define AHB_OPT_CAP_GUARDS 2
 #define AHB_OPT_CAP_SPREAD_AT 2097152
 #define AHB_OPT_CAP_SPREAD_DIV 4096
 #define AHB_OPT_WC 16
@@ -128,9 +132,9 @@ static const struct {
 } variants[] = {
     {"header", header},
     {"current", v_current},
-    {"previous", v_previous},
+    {"sampled", v_sampled},
     {"no_caps", v_no_caps},
-    {"no_guard", v_no_guard},
+    {"early", v_early},
     {"wc16", v_wc16},
 };
 #define VARIANT_COUNT ((int)(sizeof(variants) / sizeof(variants[0])))

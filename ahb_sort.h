@@ -91,8 +91,8 @@ static inline void AHB_Sort(int *arr, int size) {
 #define AHB_COMPARE_FN AHB_CONCAT(ahb_compare_, AHB_SUFFIX)
 #define AHB_SPARSE_FN AHB_CONCAT(ahb_sparse_sort_, AHB_SUFFIX)
 
-/* Slot of a value in the 1024-slot table of the sparse sort */
-#define AHB_HASH(x) ((size_t)(((uint64_t)(AHB_U)(x) * 0x9E3779B97F4A7C15ULL) >> 54))
+/* Slot of a value in the 4096-slot table of the sparse sort */
+#define AHB_HASH(x) ((size_t)(((uint64_t)(AHB_U)(x) * 0x9E3779B97F4A7C15ULL) >> 52))
 
 /* Bucket of an element: its offset from the minimum, divided by the bucket
  * width (a power of two). Unsigned subtraction gives the exact offset for any
@@ -122,12 +122,14 @@ static int AHB_COMPARE_FN(const void *a, const void *b) {
  * small hash table, sort the distinct values, and write each one back as
  * many times as it occurred. Returns 1 if it sorted the array. Returns 0,
  * leaving the array untouched, if it met more than 256 distinct values or
- * could not allocate the table. */
-static int AHB_SPARSE_FN(AHB_T *arr, size_t count) {
-    enum { AHB_SLOTS = 1024, AHB_MAX_DISTINCT = 256 };
+ * could not allocate the table; *scanned is then the number of elements it
+ * got through first. */
+static int AHB_SPARSE_FN(AHB_T *arr, size_t count, size_t *scanned) {
+    enum { AHB_SLOTS = 4096, AHB_MAX_DISTINCT = 256 };
     size_t keys_bytes = AHB_SLOTS * sizeof(AHB_T);
     size_t distinct_bytes = AHB_MAX_DISTINCT * sizeof(AHB_T);
     char *memory = (char *)malloc(keys_bytes + distinct_bytes + AHB_SLOTS * sizeof(uint32_t));
+    *scanned = 0;
     if (!memory) return 0;
 
     AHB_T *keys = (AHB_T *)memory;
@@ -137,7 +139,7 @@ static int AHB_SPARSE_FN(AHB_T *arr, size_t count) {
     memset(counts, 0, AHB_SLOTS * sizeof(uint32_t));
 
     /* A slot is in use when its count is non-zero. Collisions move on to the
-     * next slot; the table is at most a quarter full, so runs stay short. */
+     * next slot; the table is at most one sixteenth full, so runs stay short. */
     size_t i;
     for (i = 0; i < count; i++) {
         AHB_T value = arr[i];
@@ -162,6 +164,7 @@ static int AHB_SPARSE_FN(AHB_T *arr, size_t count) {
             for (uint32_t c = counts[slot]; c > 0; c--) *out++ = value;
         }
     }
+    *scanned = i;
     free(memory);
     return sorted;
 }
@@ -210,28 +213,30 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
      *   repeats  two samples are equal, so there may be few distinct values
      *   spread   the values look evenly spread over the range: no two samples
      *            are equal and every eighth of the range holds at least three
-     *   ordered  at least 56 of the 63 neighbouring samples are in ascending
-     *            order (or 56 in descending order), so the array is close to
-     *            sorted and its elements reach the buckets in sequence
-     *   bulk     the width of the middle half of the sample */
+     *   ordered  the array is close to sorted, or made of sorted runs, so its
+     *            elements reach the buckets more or less in sequence. Either
+     *            at least 56 of the 63 neighbouring samples are in ascending
+     *            order (or 56 in descending order), or at least 56 of the 64
+     *            samples are in order with the element right after them. */
+    AHB_T sample[64];
     int spread = 0, repeats = 0, ordered = 0;
-    AHB_U bulk = 0;
     if (count >= 1024) {
-        AHB_T sample[64];
         unsigned bins[8] = {0};
-        unsigned rising = 0, falling = 0;
+        unsigned rising = 0, falling = 0, steps_up = 0, steps_down = 0;
         const size_t step = count / 64;
         const AHB_U bin_width = span / 8 + 1;
         for (i = 0; i < 64; i++) {
-            AHB_T value = arr[i * step];
+            AHB_T value = arr[i * step], next = arr[i * step + 1];
             sample[i] = value;
             bins[((AHB_U)value - min_u) / bin_width]++;
+            if (next >= value) steps_up++;
+            if (next <= value) steps_down++;
         }
         for (i = 1; i < 64; i++) {
             if (sample[i] >= sample[i - 1]) rising++;
             if (sample[i] <= sample[i - 1]) falling++;
         }
-        ordered = rising >= 56 || falling >= 56;
+        ordered = rising >= 56 || falling >= 56 || steps_up >= 56 || steps_down >= 56;
         AHB_INSERTION_FN(sample, 64);
         for (i = 1; i < 64; i++) {
             if (sample[i] == sample[i - 1]) repeats = 1;
@@ -240,7 +245,6 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         for (i = 0; i < 8; i++) {
             if (bins[i] < 3) spread = 0;
         }
-        bulk = (AHB_U)sample[47] - (AHB_U)sample[16];
     }
 
     /* Narrow range: count each value and write the values straight back. No
@@ -264,7 +268,8 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
     }
 
     /* Wide range but repeated values in the sample: try the sparse sort */
-    if (repeats && AHB_SPARSE_FN(arr, count)) return;
+    size_t sparse_scanned = 0;
+    if (repeats && AHB_SPARSE_FN(arr, count, &sparse_scanned)) return;
 
     /* Choose how many buckets to aim for.
      *
@@ -272,22 +277,33 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
      *   - count for evenly spread data: that leaves so few elements per
      *     bucket that one insertion pass over the whole array finishes the
      *     job (see below).
-     *   - Large arrays get far fewer buckets, because the per-bucket counters
-     *     stop fitting in the cache and every count and every move becomes a
-     *     cache miss. The buckets are then large and are sorted recursively,
-     *     each one small enough to stay in the cache:
-     *       - evenly spread data of more than 2^21 elements: count / 4096;
-     *       - other data of 2^18 elements or more: 8192, but only if that
-     *         still splits the bulk of the data over several buckets. Tightly
-     *         clustered data is better served by narrow buckets that isolate
-     *         the cluster at once.
-     *     Nearly sorted data is left alone: it fills the buckets in sequence,
-     *     which is already kind to the cache. */
+     *   - Arrays of more than 2^21 elements get far fewer buckets, because
+     *     the per-bucket counters stop fitting in the cache and every count
+     *     and every move becomes a cache miss. The buckets are then large and
+     *     are sorted recursively, each one small enough to stay in the cache.
+     *     Evenly spread data gets count / 4096 buckets and other data 8192.
+     *
+     * Fewer buckets only help if the data really spreads over them, so the
+     * limit is not applied when:
+     *   - the array is close to sorted or made of sorted runs: it fills the
+     *     buckets in sequence, which is already kind to the cache;
+     *   - the sample falls into fewer than 32 of the 8192 buckets: the data
+     *     sits in a few clusters, and narrow buckets isolate those at once;
+     *   - the sparse sort got through more than half the array before giving
+     *     up: a few values dominate, and narrow buckets isolate those too. */
     size_t target = count / 2;
     if (spread) {
-        target = (count > ((size_t)1 << 21) && !ordered) ? count / 4096 : count;
-    } else if (count >= ((size_t)1 << 18) && !ordered && bulk >= span / 8192 + 1) {
-        target = 8192;
+        target = count;
+        if (count > ((size_t)1 << 21) && !ordered) target = count / 4096;
+    } else if (count > ((size_t)1 << 21) && !ordered && sparse_scanned <= count / 2) {
+        const AHB_U wide_width = span / 8192 + 1;
+        unsigned occupied = 1;
+        for (i = 1; i < 64; i++) {
+            if (((AHB_U)sample[i] - min_u) / wide_width != ((AHB_U)sample[i - 1] - min_u) / wide_width) {
+                occupied++;
+            }
+        }
+        if (occupied >= 32) target = 8192;
     }
 
     /* Round the bucket width up to a power of two so the bucket index is a
