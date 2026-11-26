@@ -89,6 +89,10 @@ static inline void AHB_Sort(int *arr, int size) {
 #define AHB_SORT_FN AHB_CONCAT(ahb_sort_, AHB_SUFFIX)
 #define AHB_INSERTION_FN AHB_CONCAT(ahb_insertion_sort_, AHB_SUFFIX)
 #define AHB_COMPARE_FN AHB_CONCAT(ahb_compare_, AHB_SUFFIX)
+#define AHB_SPARSE_FN AHB_CONCAT(ahb_sparse_sort_, AHB_SUFFIX)
+
+/* Slot of a value in the 1024-slot table of the sparse sort */
+#define AHB_HASH(x) ((size_t)(((uint64_t)(AHB_U)(x) * 0x9E3779B97F4A7C15ULL) >> 54))
 
 /* Bucket of an element: its offset from the minimum, divided by the bucket
  * width (a power of two). Unsigned subtraction gives the exact offset for any
@@ -112,6 +116,54 @@ static inline void AHB_INSERTION_FN(AHB_T *arr, size_t count) {
 static int AHB_COMPARE_FN(const void *a, const void *b) {
     AHB_T x = *(const AHB_T *)a, y = *(const AHB_T *)b;
     return (x > y) - (x < y);
+}
+
+/* Sort for arrays with few distinct values: count each distinct value in a
+ * small hash table, sort the distinct values, and write each one back as
+ * many times as it occurred. Returns 1 if it sorted the array. Returns 0,
+ * leaving the array untouched, if it met more than 256 distinct values or
+ * could not allocate the table. */
+static int AHB_SPARSE_FN(AHB_T *arr, size_t count) {
+    enum { AHB_SLOTS = 1024, AHB_MAX_DISTINCT = 256 };
+    size_t keys_bytes = AHB_SLOTS * sizeof(AHB_T);
+    size_t distinct_bytes = AHB_MAX_DISTINCT * sizeof(AHB_T);
+    char *memory = (char *)malloc(keys_bytes + distinct_bytes + AHB_SLOTS * sizeof(uint32_t));
+    if (!memory) return 0;
+
+    AHB_T *keys = (AHB_T *)memory;
+    AHB_T *distinct = (AHB_T *)(memory + keys_bytes);
+    uint32_t *counts = (uint32_t *)(memory + keys_bytes + distinct_bytes);
+    size_t distinct_count = 0;
+    memset(counts, 0, AHB_SLOTS * sizeof(uint32_t));
+
+    /* A slot is in use when its count is non-zero. Collisions move on to the
+     * next slot; the table is at most a quarter full, so runs stay short. */
+    size_t i;
+    for (i = 0; i < count; i++) {
+        AHB_T value = arr[i];
+        size_t slot = AHB_HASH(value);
+        while (counts[slot] && keys[slot] != value) slot = (slot + 1) & (AHB_SLOTS - 1);
+        if (!counts[slot]) {
+            if (distinct_count == AHB_MAX_DISTINCT) break;
+            keys[slot] = value;
+            distinct[distinct_count++] = value;
+        }
+        counts[slot]++;
+    }
+
+    int sorted = i == count;
+    if (sorted) {
+        AHB_INSERTION_FN(distinct, distinct_count);
+        AHB_T *out = arr;
+        for (size_t d = 0; d < distinct_count; d++) {
+            AHB_T value = distinct[d];
+            size_t slot = AHB_HASH(value);
+            while (keys[slot] != value) slot = (slot + 1) & (AHB_SLOTS - 1);
+            for (uint32_t c = counts[slot]; c > 0; c--) *out++ = value;
+        }
+    }
+    free(memory);
+    return sorted;
 }
 
 /* Main sorting function */
@@ -153,9 +205,49 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
     const AHB_U min_u = (AHB_U)min_value;
     const AHB_U span = (AHB_U)max_value - min_u;
 
-    /* Narrow range (at most 2 * count possible values): count each value and
-     * write the values straight back. No scratch buffer or bucket pass. */
-    if ((uint64_t)span < 2 * (uint64_t)count) {
+    /* Look at 64 evenly spaced elements to choose a strategy:
+     *
+     *   repeats  two samples are equal, so there may be few distinct values
+     *   spread   the values look evenly spread over the range: no two samples
+     *            are equal and every eighth of the range holds at least three
+     *   ordered  at least 56 of the 63 neighbouring samples are in ascending
+     *            order (or 56 in descending order), so the array is close to
+     *            sorted and its elements reach the buckets in sequence
+     *   bulk     the width of the middle half of the sample */
+    int spread = 0, repeats = 0, ordered = 0;
+    AHB_U bulk = 0;
+    if (count >= 1024) {
+        AHB_T sample[64];
+        unsigned bins[8] = {0};
+        unsigned rising = 0, falling = 0;
+        const size_t step = count / 64;
+        const AHB_U bin_width = span / 8 + 1;
+        for (i = 0; i < 64; i++) {
+            AHB_T value = arr[i * step];
+            sample[i] = value;
+            bins[((AHB_U)value - min_u) / bin_width]++;
+        }
+        for (i = 1; i < 64; i++) {
+            if (sample[i] >= sample[i - 1]) rising++;
+            if (sample[i] <= sample[i - 1]) falling++;
+        }
+        ordered = rising >= 56 || falling >= 56;
+        AHB_INSERTION_FN(sample, 64);
+        for (i = 1; i < 64; i++) {
+            if (sample[i] == sample[i - 1]) repeats = 1;
+        }
+        spread = !repeats;
+        for (i = 0; i < 8; i++) {
+            if (bins[i] < 3) spread = 0;
+        }
+        bulk = (AHB_U)sample[47] - (AHB_U)sample[16];
+    }
+
+    /* Narrow range: count each value and write the values straight back. No
+     * scratch buffer or bucket pass. Used when the range holds at most
+     * 2 * count possible values, or at most count if the data is evenly
+     * spread, where the bucket route below is faster for the wider ranges. */
+    if ((uint64_t)span < (spread ? 1 : 2) * (uint64_t)count) {
         size_t range = (size_t)span + 1;
         uint32_t *counts = (uint32_t *)calloc(range, sizeof(uint32_t));
         if (counts) {
@@ -171,41 +263,40 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         /* Allocation failed: carry on with the bucket pass below */
     }
 
-    /* Look at 64 evenly spaced elements to see whether the values are spread
-     * evenly over the range: no two samples equal, and every eighth of the
-     * range holds at least three of them. Evenly spread data gets twice as
-     * many buckets, which leaves so few elements per bucket that one
-     * insertion pass over the whole array finishes the job (see below). */
-    int spread = 0;
-    if (count >= 1024) {
-        AHB_T sample[64];
-        unsigned bins[8] = {0};
-        const size_t step = count / 64;
-        const AHB_U bin_width = span / 8 + 1;
-        for (i = 0; i < 64; i++) {
-            AHB_T value = arr[i * step];
-            sample[i] = value;
-            bins[((AHB_U)value - min_u) / bin_width]++;
-        }
-        AHB_INSERTION_FN(sample, 64);
-        spread = 1;
-        for (i = 1; i < 64; i++) {
-            if (sample[i] == sample[i - 1]) spread = 0;
-        }
-        for (i = 0; i < 8; i++) {
-            if (bins[i] < 3) spread = 0;
-        }
+    /* Wide range but repeated values in the sample: try the sparse sort */
+    if (repeats && AHB_SPARSE_FN(arr, count)) return;
+
+    /* Choose how many buckets to aim for.
+     *
+     *   - count / 2 by default.
+     *   - count for evenly spread data: that leaves so few elements per
+     *     bucket that one insertion pass over the whole array finishes the
+     *     job (see below).
+     *   - Large arrays get far fewer buckets, because the per-bucket counters
+     *     stop fitting in the cache and every count and every move becomes a
+     *     cache miss. The buckets are then large and are sorted recursively,
+     *     each one small enough to stay in the cache:
+     *       - evenly spread data of more than 2^21 elements: count / 4096;
+     *       - other data of 2^18 elements or more: 8192, but only if that
+     *         still splits the bulk of the data over several buckets. Tightly
+     *         clustered data is better served by narrow buckets that isolate
+     *         the cluster at once.
+     *     Nearly sorted data is left alone: it fills the buckets in sequence,
+     *     which is already kind to the cache. */
+    size_t target = count / 2;
+    if (spread) {
+        target = (count > ((size_t)1 << 21) && !ordered) ? count / 4096 : count;
+    } else if (count >= ((size_t)1 << 18) && !ordered && bulk >= span / 8192 + 1) {
+        target = 8192;
     }
 
-    /* Aim for count / 2 buckets (count if the data is evenly spread), then
-     * round the bucket width up to a power of two so the bucket index is a
+    /* Round the bucket width up to a power of two so the bucket index is a
      * single shift.
      *
      * The width starts as ceil(range / target) with target >= 2, and rounding
      * it up to a power of two still leaves it <= span. So the minimum and
      * maximum always land in different buckets, and every recursive call
      * works on a strictly narrower range. */
-    const size_t target = spread ? count : count / 2;
     AHB_U bucket_width = span / (AHB_U)target + 1;
     unsigned shift = 0;
     while (((AHB_U)1 << shift) < bucket_width) shift++;
@@ -306,6 +397,8 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
 }
 
 #undef AHB_BUCKET_OF
+#undef AHB_HASH
+#undef AHB_SPARSE_FN
 #undef AHB_COMPARE_FN
 #undef AHB_INSERTION_FN
 #undef AHB_SORT_FN
