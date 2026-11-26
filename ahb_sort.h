@@ -171,22 +171,50 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         /* Allocation failed: carry on with the bucket pass below */
     }
 
-    /* Aim for count / 2 buckets, then round the bucket width up to a power of
-     * two so the bucket index is a single shift.
+    /* Look at 64 evenly spaced elements to see whether the values are spread
+     * evenly over the range: no two samples equal, and every eighth of the
+     * range holds at least three of them. Evenly spread data gets twice as
+     * many buckets, which leaves so few elements per bucket that one
+     * insertion pass over the whole array finishes the job (see below). */
+    int spread = 0;
+    if (count >= 1024) {
+        AHB_T sample[64];
+        unsigned bins[8] = {0};
+        const size_t step = count / 64;
+        const AHB_U bin_width = span / 8 + 1;
+        for (i = 0; i < 64; i++) {
+            AHB_T value = arr[i * step];
+            sample[i] = value;
+            bins[((AHB_U)value - min_u) / bin_width]++;
+        }
+        AHB_INSERTION_FN(sample, 64);
+        spread = 1;
+        for (i = 1; i < 64; i++) {
+            if (sample[i] == sample[i - 1]) spread = 0;
+        }
+        for (i = 0; i < 8; i++) {
+            if (bins[i] < 3) spread = 0;
+        }
+    }
+
+    /* Aim for count / 2 buckets (count if the data is evenly spread), then
+     * round the bucket width up to a power of two so the bucket index is a
+     * single shift.
      *
      * The width starts as ceil(range / target) with target >= 2, and rounding
      * it up to a power of two still leaves it <= span. So the minimum and
      * maximum always land in different buckets, and every recursive call
      * works on a strictly narrower range. */
-    AHB_U bucket_width = span / (AHB_U)(count / 2) + 1;
+    const size_t target = spread ? count : count / 2;
+    AHB_U bucket_width = span / (AHB_U)target + 1;
     unsigned shift = 0;
     while (((AHB_U)1 << shift) < bucket_width) shift++;
     size_t bucket_count = (size_t)(span >> shift) + 1;
 
-    /* One allocation: the scratch copy of the data, then three arrays of
-     * per-bucket bookkeeping */
+    /* One allocation: the scratch copy of the data, then one counter per
+     * bucket */
     size_t data_bytes = count * sizeof(AHB_T);
-    size_t bookkeeping_bytes = bucket_count * sizeof(uint32_t) * 3;
+    size_t bookkeeping_bytes = bucket_count * sizeof(uint32_t);
     char *memory = NULL;
     if (bookkeeping_bytes <= SIZE_MAX - data_bytes) {
         memory = (char *)malloc(data_bytes + bookkeeping_bytes);
@@ -197,12 +225,14 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         return;
     }
 
+    /* positions holds the size of each bucket first, then the place where
+     * the bucket's next element goes. Once the elements are distributed,
+     * positions[b] is the end of bucket b, which is the start of bucket
+     * b + 1. */
     AHB_T *buckets = (AHB_T *)memory;
-    uint32_t *bucket_offsets = (uint32_t *)(memory + data_bytes);
-    uint32_t *bucket_sizes = bucket_offsets + bucket_count;
-    uint32_t *positions = bucket_offsets + 2 * bucket_count;
+    uint32_t *positions = (uint32_t *)(memory + data_bytes);
 
-    memset(bucket_offsets, 0, bookkeeping_bytes);
+    memset(positions, 0, bookkeeping_bytes);
 
     /* Count elements per bucket */
     i = 0;
@@ -212,21 +242,22 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         size_t b3 = AHB_BUCKET_OF(arr[i + 2]);
         size_t b4 = AHB_BUCKET_OF(arr[i + 3]);
 
-        bucket_sizes[b1]++;
-        bucket_sizes[b2]++;
-        bucket_sizes[b3]++;
-        bucket_sizes[b4]++;
+        positions[b1]++;
+        positions[b2]++;
+        positions[b3]++;
+        positions[b4]++;
     }
     for (; i < count; i++) {
-        bucket_sizes[AHB_BUCKET_OF(arr[i])]++;
+        positions[AHB_BUCKET_OF(arr[i])]++;
     }
 
-    /* Calculate offsets */
-    uint32_t running_total = 0;
+    /* Turn sizes into start offsets */
+    uint32_t running_total = 0, largest_bucket = 0;
     for (i = 0; i < bucket_count; i++) {
-        bucket_offsets[i] = running_total;
+        uint32_t bucket_size = positions[i];
+        largest_bucket = bucket_size > largest_bucket ? bucket_size : largest_bucket;
         positions[i] = running_total;
-        running_total += bucket_sizes[i];
+        running_total += bucket_size;
     }
 
     /* Distribute elements */
@@ -234,21 +265,43 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
         buckets[positions[AHB_BUCKET_OF(arr[i])]++] = arr[i];
     }
 
-    /* Sort individual buckets */
-    size_t threshold = count < 1024 ? count / 16 : 64;
-    for (i = 0; i < bucket_count; i++) {
-        size_t bucket_size = bucket_sizes[i];
-        if (bucket_size <= 1) continue;
-
-        AHB_T *bucket = &buckets[bucket_offsets[i]];
-        if (bucket_size > threshold) {
-            AHB_SORT_FN(bucket, bucket_size);
-        } else {
-            AHB_INSERTION_FN(bucket, bucket_size);
+    if (spread && largest_bucket <= 64) {
+        /* Evenly spread data, and every bucket turned out small. The buckets
+         * are already in order relative to each other, so one insertion sort
+         * over everything only ever moves an element within its own bucket.
+         * That is cheaper than visiting the buckets one at a time. It reads
+         * from the scratch buffer and writes into arr, which also replaces
+         * the copy back. */
+        arr[0] = buckets[0];
+        for (i = 1; i < count; i++) {
+            AHB_T key = buckets[i];
+            size_t j = i;
+            while (j > 0 && arr[j - 1] > key) {
+                arr[j] = arr[j - 1];
+                j--;
+            }
+            arr[j] = key;
         }
+    } else {
+        /* Sort individual buckets */
+        size_t threshold = count < 1024 ? count / 16 : 64;
+        size_t bucket_start = 0;
+        for (i = 0; i < bucket_count; i++) {
+            size_t bucket_end = positions[i];
+            size_t bucket_size = bucket_end - bucket_start;
+            AHB_T *bucket = &buckets[bucket_start];
+            bucket_start = bucket_end;
+            if (bucket_size <= 1) continue;
+
+            if (bucket_size > threshold) {
+                AHB_SORT_FN(bucket, bucket_size);
+            } else {
+                AHB_INSERTION_FN(bucket, bucket_size);
+            }
+        }
+        memcpy(arr, buckets, data_bytes);
     }
 
-    memcpy(arr, buckets, data_bytes);
     free(memory);
 }
 

@@ -127,6 +127,22 @@ static void pat_cluster_with_outlier(uint64_t *out, size_t count, uint64_t top) 
     if (count > 0) out[count / 2] = top - top / 3;
 }
 
+// Built against the sort's sampling step: the 64 elements it samples are
+// spread over the whole range, while every other element sits in one tight
+// cluster. The sort then picks its evenly-spread strategy and has to back out
+// of it when it finds the oversized bucket.
+static void pat_cluster_hidden_from_sample(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t middle = top / 2 + 1;
+    size_t step = count / 64;
+    for (size_t i = 0; i < count; i++) {
+        if (step == 0 || i % step == 0) {
+            out[i] = next_u64() & top;
+        } else {
+            out[i] = middle + next_u64() % 50;
+        }
+    }
+}
+
 static void pat_powers_of_two(uint64_t *out, size_t count, uint64_t top) {
     unsigned bits = top == UINT32_MAX ? 32 : 64;
     for (size_t i = 0; i < count; i++) out[i] = (uint64_t)1 << (next_u64() % bits);
@@ -184,6 +200,7 @@ static const struct {
     {"single low outlier", pat_single_low_outlier},
     {"cluster with outlier", pat_cluster_with_outlier},
     {"powers of two", pat_powers_of_two},
+    {"cluster hidden from sample", pat_cluster_hidden_from_sample},
     {"all equal", pat_all_equal},
     {"already sorted", pat_sorted},
     {"reversed", pat_reversed},
