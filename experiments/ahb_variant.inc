@@ -47,6 +47,10 @@
  *                       data of more than AHB_OPT_CAP_SPREAD_AT elements
  *   AHB_OPT_CAP_SPREAD_DIV  D > 0 = size / D buckets for evenly spread data
  *                       of more than AHB_OPT_CAP_SPREAD_AT elements
+ *   AHB_OPT_ORDERED_MIN    how many of the sample comparisons must agree for
+ *                          the array to count as ordered (default 56).
+ *   AHB_OPT_ORDERED_TURNS  also count the array as ordered when the samples
+ *                          change direction at most this many times (0 = off).
  *   AHB_OPT_CAP_GUARDS  1 = no cap when the sample is already in order, and
  *                       no AHB_OPT_CAP_SKEW cap when the middle half of the
  *                       sample would fit in one capped bucket;
@@ -118,6 +122,12 @@
 #endif
 #ifndef AHB_OPT_CAP_SPREAD_DIV
 #define AHB_OPT_CAP_SPREAD_DIV 0
+#endif
+#ifndef AHB_OPT_ORDERED_MIN
+#define AHB_OPT_ORDERED_MIN 56
+#endif
+#ifndef AHB_OPT_ORDERED_TURNS
+#define AHB_OPT_ORDERED_TURNS 0
 #endif
 #ifndef AHB_OPT_CAP_GUARDS
 #define AHB_OPT_CAP_GUARDS 0
@@ -245,9 +255,23 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
             if (sample[k] >= sample[k - 1]) rising++;
             if (sample[k] <= sample[k - 1]) falling++;
         }
-        ordered = rising >= 56 || falling >= 56;
+        (void)steps_up; (void)steps_down;
+        ordered = rising >= AHB_OPT_ORDERED_MIN || falling >= AHB_OPT_ORDERED_MIN;
 #if AHB_OPT_CAP_GUARDS == 2
-        ordered = ordered || steps_up >= 56 || steps_down >= 56;
+        ordered = ordered || steps_up >= AHB_OPT_ORDERED_MIN || steps_down >= AHB_OPT_ORDERED_MIN;
+#endif
+#if AHB_OPT_ORDERED_TURNS
+        {
+            // Long rising and falling stretches (organ pipe, a few big runs):
+            // the samples change direction only a few times.
+            int turns = 0, direction = 0;
+            for (int k = 1; k < 64; k++) {
+                int d = (sample[k] > sample[k - 1]) - (sample[k] < sample[k - 1]);
+                if (d && direction && d != direction) turns++;
+                if (d) direction = d;
+            }
+            ordered = ordered || turns <= AHB_OPT_ORDERED_TURNS;
+        }
 #endif
         ahbv_insertion_sort(sample, 64);
         for (int k = 1; k < 64; k++) {
@@ -563,6 +587,8 @@ static void AHB_FN(int *arr, int size) {
 #undef AHB_OPT_CAP_SKEW_AT
 #undef AHB_OPT_CAP_SPREAD_DIV
 #undef AHB_OPT_CAP_GUARDS
+#undef AHB_OPT_ORDERED_MIN
+#undef AHB_OPT_ORDERED_TURNS
 #undef AHB_OPT_WC
 #undef AHBV_ARRAYS
 #undef AHBV_REC

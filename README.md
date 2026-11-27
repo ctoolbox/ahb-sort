@@ -12,7 +12,7 @@ Geometric mean over 6 input patterns and 5 array sizes (1,000 to 5,000,000 eleme
 
 Measured on an Apple M3 Max with Apple clang 21, `-O3 -march=native`. Numbers will differ on other machines.
 
-**Read these as best-case figures.** The sort's thresholds were tuned on these same six input shapes. On 16 other shapes that played no part in the tuning, AHB Sort averages 1.5x faster than the radix sort at 5M elements and loses to it on 6 of them; see [Inputs Outside the Tuning Set](#inputs-outside-the-tuning-set-).
+**Read these as best-case figures.** The sort's thresholds were tuned on these same six input shapes. On 12 shapes that played no part in the tuning, AHB Sort averages 1.2x faster than the radix sort at 5M elements and loses to it on 6 of them; see [Inputs Outside the Tuning Set](#inputs-outside-the-tuning-set-).
 
 ## Detailed Results (5M Elements) 📊
 
@@ -69,7 +69,40 @@ Radix sort is still ahead on both: by about 1.6x on evenly spread data, and on t
 
 ## Inputs Outside the Tuning Set 🧪
 
-The thresholds in the sort were chosen by timing the inputs above, so those numbers flatter it. These 16 shapes were written afterwards as a check. 32-bit elements, 5M elements, AHB Sort time in milliseconds; "previous" is AHB Sort before sparse counting and the bucket limits were added.
+The thresholds in the sort were chosen by timing the inputs above, so those numbers flatter it. Three further sets of shapes were timed as checks. The first two each exposed a slowdown that was then fixed, which makes them tuning inputs as well; only the third is an independent check. 32-bit elements, 5M elements, AHB Sort time in milliseconds; "previous" is AHB Sort before sparse counting and the bucket limits were added.
+
+### Shapes never used for tuning
+
+These 12 were written and timed once, after the code was final. Nothing in the sort was changed in response.
+
+| Input | AHB Sort | vs previous version | vs radix |
+|---|---|---|---|
+| V shape (falling, then rising) | 11.8 | 0.95x | 2.0x |
+| Four sine waves | 11.0 | 1.0x | 2.9x |
+| Forty sine waves | 16.3 | 1.0x | 2.6x |
+| Sorted, 25% of elements random | 24.7 | 1.0x | 0.59x |
+| Descending, 5% of elements random | 24.4 | 1.0x | 0.59x |
+| Locally shuffled | 18.1 | 1.0x | 0.92x |
+| Two rising sequences, interleaved | 9.5 | 1.5x | 2.1x |
+| Uniform, 31 bits | 22.9 | 1.8x | 0.66x |
+| Triangular | 31.4 | 1.4x | 0.48x |
+| Three sorted runs | 7.7 | 1.0x | 4.1x |
+| Random with a 10% sorted prefix | 24.2 | 1.5x | 0.62x |
+| One third a single value | 30.7 | 1.2x | 1.1x |
+
+- Against radix sort the geometric mean is 1.2x, with 6 wins and 6 losses. The losses are wide data again: smooth distributions and arrays that are part sorted and part random.
+- Against the previous version the geometric mean is 1.16x: five shapes are 1.2x to 1.8x faster and none is slower beyond the noise of the measurement (about 10%).
+
+### Shapes used to adjust the bucket limits
+
+Both sets below were written as checks, and both found a problem:
+
+- On the first set, an early draft of the bucket limits was up to 2.5x slower than the previous version (two clusters, sorted runs, half sorted). The conditions on the limits in [How It Works](#how-it-works-) were added until that stopped.
+- On the second set, organ-pipe data was 2.9x slower and "sorted, every 10th element random" 1.3x slower, because neither was recognised as ordered. The ordered test was widened to fix both.
+
+So these numbers are tuned results too.
+
+First set:
 
 | Input | AHB Sort | vs previous version | vs radix |
 |---|---|---|---|
@@ -90,9 +123,32 @@ The thresholds in the sort were chosen by timing the inputs above, so those numb
 | Jittered timestamps | 18.22 | 1.0x | 1.7x |
 | 90% one value | 22.66 | 1.0x | 2.9x |
 
-- Against radix sort the geometric mean is 1.5x, with 9 wins, 1 tie and 6 losses. The losses are wide data again: smooth distributions (Gaussian, skewed, uniform over 10n) and arrays that are part sorted and part random.
-- Against the previous version, six shapes are 1.1x to 2.3x faster and one is clearly slower: 200 distinct values followed by unrelated values at the very end. The sparse path counts almost the whole array before it has to give up, and that pass is wasted.
-- An earlier draft of the bucket limits was up to 2.5x slower than the previous version on three of these shapes (two clusters, sorted runs, half sorted). That is what the conditions on the limits in [How It Works](#how-it-works-) are for.
+- Against radix sort the geometric mean is 1.5x, with 9 wins, 1 tie and 6 losses.
+- One shape is still clearly slower than before: 200 distinct values followed by unrelated values at the very end. The sparse path counts almost the whole array before it has to give up, and that pass is wasted.
+
+Second set:
+
+| Input | AHB Sort | vs previous version | vs radix |
+|---|---|---|---|
+| Three clusters (80% / 15% / 5%) | 20.9 | 1.0x | 1.3x |
+| Log-uniform | 27.7 | 1.0x | 1.4x |
+| Bimodal Gaussian | 25.5 | 1.9x | 0.62x |
+| Interleaved rising and falling | 18.3 | 0.9x | 1.1x |
+| Organ pipe (rising, then falling) | 11.1 | 1.0x | 2.5x |
+| Sorted blocks in reverse order | 9.2 | 1.0x | 2.6x |
+| 5,000 distinct values | 10.9 | 1.3x | 4.4x |
+| 257 distinct values | 6.1 | 1.4x | 9.6x |
+| Narrow range + `INT_MIN`/`INT_MAX` outliers | 26.5 | 1.7x | 0.65x |
+| Multiples of 1,000 | 18.8 | 1.6x | 1.3x |
+| Uniform, range 100n | 23.7 | 1.7x | 0.66x |
+| Sorted, every 10th element random | 22.8 | 1.0x | 0.64x |
+| Random walk | 13.7 | 1.0x | 1.6x |
+| Pareto tail | 3.7 | 1.0x | 10.6x |
+| Top-heavy (1 - u^3) | 31.0 | 1.4x | 0.55x |
+| 200 distinct values + 2% others, mixed in | 16.0 | 0.7x–0.8x | 3.7x |
+
+- Against radix sort the geometric mean is 1.7x, with 11 wins and 5 losses.
+- Two shapes are still slower than the previous version: "interleaved rising and falling" slightly, and "200 distinct values + 2% others, mixed in", where the sparse path counts part of the array before giving up.
 
 ## 64-bit Elements 📏
 
@@ -151,7 +207,7 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
    - For arrays of 1,024 elements or more, looks at 64 evenly spaced elements
    - *Evenly spread*: no two samples are equal and every eighth of the value range holds at least three of them
    - *Repeats*: two samples are equal, so there may be few distinct values
-   - *Nearly sorted*: at least 56 of the 63 neighbouring samples are already in order, or at least 56 of the 64 samples are in order with the element right after them (which catches arrays made of sorted runs)
+   - *Nearly sorted*: at least 48 of the 63 neighbouring samples are already in order, or at least 48 of the 64 samples are in order with the element right after them (which catches arrays made of sorted runs), or the samples change direction at most 7 times (which catches long rising and falling stretches). Random data gives about 32, 32 and 41
 
 3. **Counting Path for Narrow Ranges**
    - If the range is at most 2n (at most n for evenly spread data), counts each value and writes the values straight back

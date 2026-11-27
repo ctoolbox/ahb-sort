@@ -66,6 +66,8 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_CAP_GUARDS 2
 #define AHB_OPT_CAP_SPREAD_AT 2097152
 #define AHB_OPT_CAP_SPREAD_DIV 4096
+#define AHB_OPT_ORDERED_MIN 48
+#define AHB_OPT_ORDERED_TURNS 7
 #include "ahb_variant.inc"
 
 #define AHB_FN v_sampled
@@ -118,6 +120,8 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_CAP_GUARDS 2
 #define AHB_OPT_CAP_SPREAD_AT 2097152
 #define AHB_OPT_CAP_SPREAD_DIV 4096
+#define AHB_OPT_ORDERED_MIN 48
+#define AHB_OPT_ORDERED_TURNS 7
 #define AHB_OPT_WC 16
 #include "ahb_variant.inc"
 

@@ -214,15 +214,19 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
      *   spread   the values look evenly spread over the range: no two samples
      *            are equal and every eighth of the range holds at least three
      *   ordered  the array is close to sorted, or made of sorted runs, so its
-     *            elements reach the buckets more or less in sequence. Either
-     *            at least 56 of the 63 neighbouring samples are in ascending
-     *            order (or 56 in descending order), or at least 56 of the 64
-     *            samples are in order with the element right after them. */
+     *            elements reach the buckets more or less in sequence. One of:
+     *            at least 48 of the 63 neighbouring samples are in ascending
+     *            order (or 48 in descending order); at least 48 of the 64
+     *            samples are in order with the element right after them; or
+     *            the samples change direction at most 7 times (long rising
+     *            and falling stretches). Random data gives about 32, 32
+     *            and 41. */
     AHB_T sample[64];
     int spread = 0, repeats = 0, ordered = 0;
     if (count >= 1024) {
         unsigned bins[8] = {0};
-        unsigned rising = 0, falling = 0, steps_up = 0, steps_down = 0;
+        unsigned rising = 0, falling = 0, steps_up = 0, steps_down = 0, turns = 0;
+        int direction = 0;
         const size_t step = count / 64;
         const AHB_U bin_width = span / 8 + 1;
         for (i = 0; i < 64; i++) {
@@ -233,10 +237,13 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
             if (next <= value) steps_down++;
         }
         for (i = 1; i < 64; i++) {
-            if (sample[i] >= sample[i - 1]) rising++;
-            if (sample[i] <= sample[i - 1]) falling++;
+            const int d = (sample[i] > sample[i - 1]) - (sample[i] < sample[i - 1]);
+            if (d >= 0) rising++;
+            if (d <= 0) falling++;
+            if (d && direction && d != direction) turns++;
+            if (d) direction = d;
         }
-        ordered = rising >= 56 || falling >= 56 || steps_up >= 56 || steps_down >= 56;
+        ordered = rising >= 48 || falling >= 48 || steps_up >= 48 || steps_down >= 48 || turns <= 7;
         AHB_INSERTION_FN(sample, 64);
         for (i = 1; i < 64; i++) {
             if (sample[i] == sample[i - 1]) repeats = 1;

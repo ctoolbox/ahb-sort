@@ -191,6 +191,18 @@ static void pat_sorted_runs(uint64_t *out, size_t count, uint64_t top) {
     }
 }
 
+// Rising over the first half and falling over the second
+static void pat_organ_pipe(uint64_t *out, size_t count, uint64_t top) {
+    const uint64_t scale = top / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = (i < count / 2 ? i : count - i) * scale;
+}
+
+// Ascending, with every tenth element replaced by a random value
+static void pat_sorted_tenth_random(uint64_t *out, size_t count, uint64_t top) {
+    const uint64_t scale = top / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = i % 10 == 3 ? next_u64() & top : i * scale;
+}
+
 // Ascending and bunched towards the bottom of the range, with 1% of the
 // elements swapped at random
 static void pat_sorted_skewed_with_swaps(uint64_t *out, size_t count, uint64_t top) {
@@ -275,6 +287,8 @@ static const struct {
     {"tight cluster", pat_tight_cluster},
     {"sorted with swaps", pat_sorted_with_swaps},
     {"sorted runs", pat_sorted_runs},
+    {"organ pipe", pat_organ_pipe},
+    {"sorted, every tenth random", pat_sorted_tenth_random},
     {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
     {"late surprise", pat_late_surprise},
     {"already sorted", pat_sorted},
@@ -300,6 +314,8 @@ static const struct {
     {"tight cluster", pat_tight_cluster},
     {"sorted with swaps", pat_sorted_with_swaps},
     {"sorted runs", pat_sorted_runs},
+    {"organ pipe", pat_organ_pipe},
+    {"sorted, every tenth random", pat_sorted_tenth_random},
     {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
     {"late surprise", pat_late_surprise},
     {"nearly sorted", pat_nearly_sorted},
