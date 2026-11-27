@@ -6,11 +6,13 @@ A pet project focused on optimizing the classic bucket sort algorithm through va
 
 Geometric mean over 6 input patterns and 5 array sizes (1,000 to 5,000,000 elements):
 
-- 12.8x faster than `qsort`
-- 2.5x faster than the original bucket sort
-- 1.7x faster than a byte-wise LSD radix sort on average, but **slower than it on wide, evenly spread data** (see below)
+- 15.3x faster than `qsort`
+- 3.0x faster than the original bucket sort
+- 2.0x faster than a byte-wise LSD radix sort on average, but **slower than it on wide 32-bit data** (see below)
 
 Measured on an Apple M3 Max with Apple clang 21, `-O3 -march=native`. Numbers will differ on other machines.
+
+**Read these as best-case figures.** The sort's thresholds were tuned on these same six input shapes. On 12 shapes that played no part in the tuning, AHB Sort averages 1.2x faster than the radix sort at 5M elements and loses to it on 6 of them; see [Inputs Outside the Tuning Set](#inputs-outside-the-tuning-set-).
 
 ## Detailed Results (5M Elements) 📊
 
@@ -18,23 +20,23 @@ Best of 7 runs, in milliseconds. Lower is better.
 
 | Input | AHB Sort | Original bucket | `qsort` | Radix (base 256) |
 |---|---|---|---|---|
-| Random, range 1000 | 1.92 | 17.28 | 178.39 | 14.88 |
-| Random, range 1e9 | 41.20 | 54.89 | 436.85 | 15.49 |
-| Nearly sorted | 22.32 | 40.36 | 173.95 | 38.89 |
-| 100 distinct values | 7.48 | 16.60 | 108.75 | 35.35 |
-| Exponential | 48.36 | 96.05 | 399.86 | 16.80 |
-| Cluster + 1% outliers | 21.74 | 44.83 | 179.55 | 34.35 |
+| Random, range 1000 | 1.80 | 16.89 | 175.00 | 16.37 |
+| Random, range 1e9 | 23.45 | 52.59 | 430.46 | 15.04 |
+| Nearly sorted | 15.12 | 39.24 | 170.42 | 38.99 |
+| 100 distinct values | 3.45 | 16.86 | 108.09 | 35.20 |
+| Exponential | 21.18 | 96.03 | 400.10 | 16.92 |
+| Cluster + 1% outliers | 20.60 | 44.27 | 177.41 | 33.97 |
 
 How many times faster AHB Sort is (below 1x means AHB Sort is slower):
 
 | Input | vs original bucket | vs `qsort` | vs radix |
 |---|---|---|---|
-| Random, range 1000 | 9.0x | 92.7x | 7.7x |
-| Random, range 1e9 | 1.3x | 10.6x | 0.38x |
-| Nearly sorted | 1.8x | 7.8x | 1.7x |
-| 100 distinct values | 2.2x | 14.5x | 4.7x |
-| Exponential | 2.0x | 8.3x | 0.35x |
-| Cluster + 1% outliers | 2.1x | 8.3x | 1.6x |
+| Random, range 1000 | 9.4x | 97.1x | 9.1x |
+| Random, range 1e9 | 2.2x | 18.4x | 0.64x |
+| Nearly sorted | 2.6x | 11.3x | 2.6x |
+| 100 distinct values | 4.9x | 31.3x | 10.2x |
+| Exponential | 4.5x | 18.9x | 0.80x |
+| Cluster + 1% outliers | 2.1x | 8.6x | 1.7x |
 
 ## Results by Array Size 📈
 
@@ -42,68 +44,154 @@ Geometric mean speedup of AHB Sort over the 6 input patterns:
 
 | Elements | vs original bucket | vs `qsort` | vs radix |
 |---|---|---|---|
-| 1,000 | 2.2x | 6.9x | 1.7x |
-| 10,000 | 2.7x | 15.0x | 1.9x |
-| 100,000 | 2.7x | 15.2x | 1.6x |
-| 1,000,000 | 2.7x | 15.6x | 1.7x |
-| 5,000,000 | 2.4x | 14.0x | 1.5x |
+| 1,000 | 2.2x | 7.0x | 1.7x |
+| 10,000 | 2.9x | 16.2x | 2.1x |
+| 100,000 | 3.2x | 18.2x | 1.9x |
+| 1,000,000 | 3.2x | 18.7x | 2.0x |
+| 5,000,000 | 3.7x | 21.6x | 2.4x |
 
-## Wide, Evenly Spread Data 🎲
+## Wide Data 🎲
 
-This is the input bucket sort is worst at against radix sort, and the one the latest change targets. AHB Sort now samples the array first and, when the values look evenly spread, switches to a strategy built for that case (see [How It Works](#how-it-works-)).
+Wide value ranges are where a bucket sort struggles against radix sort: the elements have to be spread over a very large number of buckets, and the per-bucket bookkeeping stops fitting in the CPU cache. AHB Sort handles this in two ways (see [How It Works](#how-it-works-)): a faster route for evenly spread data, and far fewer, larger buckets once the array is too big for the cache.
 
-"Random, range 1e9" with 32-bit elements, in milliseconds:
+With 32-bit elements, in milliseconds:
 
-| Elements | AHB Sort | Radix (base 256) | vs radix |
+| Input | Elements | AHB Sort | Radix (base 256) | vs radix |
+|---|---|---|---|---|
+| Random, range 1e9 | 100,000 | 0.46 | 0.28 | 0.60x |
+| Random, range 1e9 | 1,000,000 | 4.69 | 2.92 | 0.62x |
+| Random, range 1e9 | 5,000,000 | 23.45 | 15.04 | 0.64x |
+| Exponential | 100,000 | 0.67 | 0.25 | 0.37x |
+| Exponential | 1,000,000 | 8.14 | 2.71 | 0.33x |
+| Exponential | 5,000,000 | 21.18 | 16.92 | 0.80x |
+
+Radix sort is still ahead on both: by about 1.6x on evenly spread data, and on the skewed exponential input by about 3x up to 1,000,000 elements and 1.25x at 5,000,000, where the larger buckets come into play. With 64-bit elements, where radix sort needs twice the passes, the two are roughly level at 5,000,000 elements (see below).
+
+## Inputs Outside the Tuning Set 🧪
+
+The thresholds in the sort were chosen by timing the inputs above, so those numbers flatter it. Three further sets of shapes were timed as checks. The first two each exposed a slowdown that was then fixed, which makes them tuning inputs as well; only the third is an independent check. 32-bit elements, 5M elements, AHB Sort time in milliseconds; "previous" is AHB Sort before sparse counting and the bucket limits were added.
+
+### Shapes never used for tuning
+
+These 12 were written and timed once, after the code was final. Nothing in the sort was changed in response.
+
+| Input | AHB Sort | vs previous version | vs radix |
 |---|---|---|---|
-| 100,000 | 0.46 | 0.28 | 0.61x |
-| 1,000,000 | 4.73 | 2.91 | 0.62x |
-| 5,000,000 | 41.20 | 15.49 | 0.38x |
+| V shape (falling, then rising) | 11.8 | 0.95x | 2.0x |
+| Four sine waves | 11.0 | 1.0x | 2.9x |
+| Forty sine waves | 16.3 | 1.0x | 2.6x |
+| Sorted, 25% of elements random | 24.7 | 1.0x | 0.59x |
+| Descending, 5% of elements random | 24.4 | 1.0x | 0.59x |
+| Locally shuffled | 18.1 | 1.0x | 0.92x |
+| Two rising sequences, interleaved | 9.5 | 1.5x | 2.1x |
+| Uniform, 31 bits | 22.9 | 1.8x | 0.66x |
+| Triangular | 31.4 | 1.4x | 0.48x |
+| Three sorted runs | 7.7 | 1.0x | 4.1x |
+| Random with a 10% sorted prefix | 24.2 | 1.5x | 0.62x |
+| One third a single value | 30.7 | 1.2x | 1.1x |
 
-Compared with the previous version of AHB Sort, this input is about 20-35% faster at 100,000 and 1,000,000 elements and about 10-15% faster at 5,000,000, where the bucket bookkeeping no longer fits in the cache. Radix sort is still ahead, by about 1.6x up to 1,000,000 elements instead of about 2.5x.
+- Against radix sort the geometric mean is 1.2x, with 6 wins and 6 losses. The losses are wide data again: smooth distributions and arrays that are part sorted and part random.
+- Against the previous version the geometric mean is 1.16x: five shapes are 1.2x to 1.8x faster and none is slower beyond the noise of the measurement (about 10%).
 
-Data that is wide but *not* evenly spread (the exponential input) does not take the new route and is unchanged: radix sort is about 3x faster there.
+### Shapes used to adjust the bucket limits
+
+Both sets below were written as checks, and both found a problem:
+
+- On the first set, an early draft of the bucket limits was up to 2.5x slower than the previous version (two clusters, sorted runs, half sorted). The conditions on the limits in [How It Works](#how-it-works-) were added until that stopped.
+- On the second set, organ-pipe data was 2.9x slower and "sorted, every 10th element random" 1.3x slower, because neither was recognised as ordered. The ordered test was widened to fix both.
+
+So these numbers are tuned results too.
+
+First set:
+
+| Input | AHB Sort | vs previous version | vs radix |
+|---|---|---|---|
+| Two clusters | 7.41 | 1.0x | 5.4x |
+| Ten clusters | 26.89 | 1.6x | 1.0x |
+| Half sorted, half random | 32.42 | 0.95x | 0.44x |
+| Sorted + 5% random tail | 23.91 | 1.0x | 0.57x |
+| Reversed | 9.04 | 1.0x | 2.8x |
+| Sawtooth | 20.37 | 1.0x | 1.4x |
+| Shuffled sorted runs | 21.58 | 0.99x | 0.79x |
+| Gaussian | 25.64 | 1.5x | 0.58x |
+| Skewed (u^4) | 28.26 | 1.3x | 0.65x |
+| Zipf-like (1/u) | 25.26 | 1.0x | 2.3x |
+| 300 distinct values | 5.82 | 1.4x | 9.0x |
+| 200 distinct values + 2% others at the end | 12.34 | 0.66x | 4.3x |
+| Low 16 bits zero | 9.48 | 2.3x | 2.2x |
+| Uniform, range 10n | 32.62 | 1.1x | 0.67x |
+| Jittered timestamps | 18.22 | 1.0x | 1.7x |
+| 90% one value | 22.66 | 1.0x | 2.9x |
+
+- Against radix sort the geometric mean is 1.5x, with 9 wins, 1 tie and 6 losses.
+- One shape is still clearly slower than before: 200 distinct values followed by unrelated values at the very end. The sparse path counts almost the whole array before it has to give up, and that pass is wasted.
+
+Second set:
+
+| Input | AHB Sort | vs previous version | vs radix |
+|---|---|---|---|
+| Three clusters (80% / 15% / 5%) | 20.9 | 1.0x | 1.3x |
+| Log-uniform | 27.7 | 1.0x | 1.4x |
+| Bimodal Gaussian | 25.5 | 1.9x | 0.62x |
+| Interleaved rising and falling | 18.3 | 0.9x | 1.1x |
+| Organ pipe (rising, then falling) | 11.1 | 1.0x | 2.5x |
+| Sorted blocks in reverse order | 9.2 | 1.0x | 2.6x |
+| 5,000 distinct values | 10.9 | 1.3x | 4.4x |
+| 257 distinct values | 6.1 | 1.4x | 9.6x |
+| Narrow range + `INT_MIN`/`INT_MAX` outliers | 26.5 | 1.7x | 0.65x |
+| Multiples of 1,000 | 18.8 | 1.6x | 1.3x |
+| Uniform, range 100n | 23.7 | 1.7x | 0.66x |
+| Sorted, every 10th element random | 22.8 | 1.0x | 0.64x |
+| Random walk | 13.7 | 1.0x | 1.6x |
+| Pareto tail | 3.7 | 1.0x | 10.6x |
+| Top-heavy (1 - u^3) | 31.0 | 1.4x | 0.55x |
+| 200 distinct values + 2% others, mixed in | 16.0 | 0.7x–0.8x | 3.7x |
+
+- Against radix sort the geometric mean is 1.7x, with 11 wins and 5 losses.
+- Two shapes are still slower than the previous version: "interleaved rising and falling" slightly, and "200 distinct values + 2% others, mixed in", where the sparse path counts part of the array before giving up.
 
 ## 64-bit Elements 📏
 
 The first three tables are for 32-bit elements (`int`). The same benchmark with `int64_t` elements, over 10 input patterns (the six above plus four that need more than 32 bits), gives a geometric mean of:
 
-- 11.3x faster than `qsort`
-- 2.0x faster than an eight-pass byte-wise radix sort
+- 13.6x faster than `qsort`
+- 2.4x faster than an eight-pass byte-wise radix sort
 
 At 5M elements (best of 7 runs, in milliseconds):
 
 | Input | AHB Sort | `qsort` | Radix (base 256) | vs `qsort` | vs radix |
 |---|---|---|---|---|---|
-| Random, range 1000 | 2.94 | 177.70 | 22.14 | 60.5x | 7.5x |
-| Random, range 1e9 | 44.17 | 431.60 | 22.15 | 9.8x | 0.50x |
-| Nearly sorted | 22.53 | 171.88 | 45.27 | 7.6x | 2.0x |
-| 100 distinct values | 8.89 | 110.32 | 41.85 | 12.4x | 4.7x |
-| Exponential | 55.22 | 407.00 | 22.01 | 7.4x | 0.40x |
-| Cluster + 1% outliers | 24.79 | 181.17 | 40.29 | 7.3x | 1.6x |
-| Random, range 1e18 | 47.92 | 432.32 | 31.58 | 9.0x | 0.66x |
-| Random, full 64-bit | 45.35 | 430.47 | 30.83 | 9.5x | 0.68x |
-| 100 distinct over 1e18 | 8.32 | 123.95 | 77.91 | 14.9x | 9.4x |
-| Exponential, scale 1e15 | 55.53 | 430.36 | 30.82 | 7.8x | 0.55x |
+| Random, range 1000 | 2.96 | 178.30 | 21.81 | 60.2x | 7.4x |
+| Random, range 1e9 | 25.61 | 429.64 | 22.33 | 16.8x | 0.87x |
+| Nearly sorted | 15.85 | 172.06 | 44.15 | 10.9x | 2.8x |
+| 100 distinct values | 4.02 | 108.50 | 42.31 | 27.0x | 10.5x |
+| Exponential | 22.77 | 403.36 | 21.90 | 17.7x | 0.96x |
+| Cluster + 1% outliers | 24.37 | 179.25 | 41.10 | 7.4x | 1.7x |
+| Random, range 1e18 | 26.40 | 431.58 | 31.36 | 16.4x | 1.2x |
+| Random, full 64-bit | 24.97 | 431.85 | 30.56 | 17.3x | 1.2x |
+| 100 distinct over 1e18 | 4.99 | 127.98 | 78.48 | 25.7x | 15.7x |
+| Exponential, scale 1e15 | 28.08 | 433.12 | 30.73 | 15.4x | 1.1x |
 
-At 5M elements AHB Sort is 1% to 19% slower than on the same values stored as 32-bit data, except on the narrow-range input, where it is about 50% slower (2.94 ms against 1.92 ms). The pattern is the same: it wins on narrow, clustered and repetitive data and loses to radix sort on wide, evenly spread data, though by less than at 32 bits because radix needs more passes. At 100,000 and 1,000,000 elements the random 64-bit inputs come out between 0.83x and 1.28x of radix sort.
+At 5M elements AHB Sort is 5% to 18% slower than on the same values stored as 32-bit data, except on the narrow-range input, where it is about 65% slower (2.96 ms against 1.80 ms). At 100,000 and 1,000,000 elements the wide random and exponential 64-bit inputs come out between 0.49x and 1.34x of radix sort.
 
 ## Performance Summary 🎯
 
 1. **Where it shines**
-   - Narrow value ranges: when the range is at most twice the array size, AHB Sort switches to a counting sort (about 90x to 120x faster than `qsort` from 100,000 elements up)
-   - Few distinct values, clustered data and nearly sorted data: 1.4x to 5.3x faster than radix sort at 100,000 elements and up
+   - Narrow value ranges: AHB Sort switches to a counting sort, about 100x faster than `qsort` from 100,000 elements up
+   - Few distinct values, however far apart: a small hash table counts them, about 10x faster than radix sort at 5,000,000 elements
+   - Clustered and nearly sorted data: 1.7x to 2.6x faster than radix sort at 5,000,000 elements
 
 2. **Where it loses**
-   - Wide, evenly spread values (random over 1e9): radix sort is about 1.6x faster at 100,000 to 1,000,000 elements and 2.6x faster at 5,000,000
-   - Wide, skewed values (exponential): radix sort is about 3x faster from 100,000 elements up
-   - In both cases the cause is the same: spreading elements over hundreds of thousands of buckets is hard on the cache
+   - Wide, evenly spread 32-bit values (random over 1e9): radix sort is about 1.6x faster from 100,000 elements up
+   - Wide, smoothly distributed 32-bit values (exponential, Gaussian): radix sort is up to 3x faster
+   - Arrays that are part sorted and part random: radix sort is about 2x faster
 
 3. **Caveats**
-   - `qsort` calls its comparator through a function pointer, so it is a slow baseline; an inlined comparison sort would be closer
+   - `qsort` calls its comparator through a function pointer, so it is a slow baseline; an inlined comparison sort would be closer. The radix sort is a plain byte-wise one; tuned radix sorts are faster.
+   - The main benchmark uses the inputs the sort was tuned on; see [Inputs Outside the Tuning Set](#inputs-outside-the-tuning-set-).
    - The benchmark sorts `int` arrays whose values are all non-negative and at most 1e9, because the original bucket sort baseline cannot handle wider ranges. AHB Sort itself handles the full range of every supported type, and the tests cover it.
-   - The bucket counts, the counting threshold and the sample test were tuned on 32-bit data on one machine (an Apple M3 Max); the 64-bit variants use the same settings. The best bucket count depends on cache size, so the gains on evenly spread data may differ elsewhere.
-   - The sample test is a heuristic on 64 elements. About 1 in 12 evenly spread inputs fails it by chance and is sorted the ordinary way: still correct, just without the speedup. "Random, full 64-bit" at 1,000,000 elements looks like one such case in the benchmark (7.2 ms, against 5.2 ms for "Random, range 1e18").
+   - Every threshold was tuned on 32-bit data on one machine, an Apple M3 Max; the 64-bit variants use the same settings. The array size at which AHB Sort switches to fewer buckets (2^21 elements) reflects that machine's caches (128 KB L1, 16 MB L2) and is probably not the best choice elsewhere.
+   - The strategy is chosen from a sample of 64 elements, so it can be wrong. The result is always correctly sorted; a wrong guess only costs speed. About 1 in 12 evenly spread inputs fails the evenly-spread test by chance. "Random, full 64-bit" at 1,000,000 elements looks like one such case in the benchmark (7.2 ms, against 5.0 ms for "Random, range 1e18").
 
 ## How It Works 🔍
 
@@ -113,25 +201,33 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
    - Handles edge cases (empty or single-element arrays)
    - Detects already sorted sequences
    - Uses insertion sort for small arrays (n ≤ 16)
-
-2. **Counting Path for Narrow Ranges**
    - Finds the minimum and maximum in one pass
-   - If the range is at most 2n, counts each value and writes the values straight back
+
+2. **Sampling**
+   - For arrays of 1,024 elements or more, looks at 64 evenly spaced elements
+   - *Evenly spread*: no two samples are equal and every eighth of the value range holds at least three of them
+   - *Repeats*: two samples are equal, so there may be few distinct values
+   - *Nearly sorted*: at least 48 of the 63 neighbouring samples are already in order, or at least 48 of the 64 samples are in order with the element right after them (which catches arrays made of sorted runs), or the samples change direction at most 7 times (which catches long rising and falling stretches). Random data gives about 32, 32 and 41
+
+3. **Counting Path for Narrow Ranges**
+   - If the range is at most 2n (at most n for evenly spread data), counts each value and writes the values straight back
    - No scratch buffer or bucket pass needed
 
-3. **Sampling**
-   - For arrays of 1,024 elements or more, looks at 64 evenly spaced elements
-   - The data counts as evenly spread if no two samples are equal and every eighth of the value range holds at least three of them
+4. **Sparse Path for Few Distinct Values**
+   - If the sample has repeats, counts the distinct values in a 4,096-slot hash table, sorts them, and writes each back as many times as it occurred
+   - Gives up as soon as it has seen more than 256 distinct values
 
-4. **Bucket Path**
-   - Aims for n / 2 buckets, or n buckets if the sample says the data is evenly spread
+5. **Bucket Path**
+   - Aims for n / 2 buckets, or n buckets for evenly spread data
+   - Arrays of more than 2^21 elements get far fewer buckets, so the bookkeeping stays in the cache: n / 4096 for evenly spread data and 8,192 for other data
+   - That limit is skipped where it would not help: for nearly sorted data, which fills the buckets in sequence anyway; when the sample falls into fewer than 32 of the 8,192 buckets, because narrow buckets isolate clusters at once; and when the sparse path got through more than half the array before giving up
    - Rounds the bucket width up to a power of two, so the bucket index is a single shift
    - Counts, computes offsets, then distributes into one scratch buffer
 
-5. **Finishing the Buckets**
-   - Ordinary data: small buckets are finished with insertion sort, and large buckets are sorted recursively; each level works on a strictly narrower range
-   - Evenly spread data where every bucket came out small (64 elements or fewer): one insertion sort over the whole array. The buckets are already in order relative to each other, so no element moves further than its own bucket, and the sort skips the visit to each of the hundreds of thousands of tiny buckets
-   - If the sample was wrong and a large bucket turns up, the sort goes back to the ordinary route
+6. **Finishing the Buckets**
+   - Ordinary case: small buckets are finished with insertion sort, and large buckets are sorted recursively; each level works on a strictly narrower range
+   - Evenly spread data where every bucket came out small (64 elements or fewer): one insertion sort over the whole array. The buckets are already in order relative to each other, so no element moves further than its own bucket, and the sort skips the visit to each of the many tiny buckets
+   - If the sample was wrong and a large bucket turns up, the sort goes back to the ordinary case
 
 ## Optimizations in Detail ⚡
 
@@ -144,6 +240,7 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
 - Integer-only min/max pass
 - Unsigned offsets from the minimum, so any spread of values is safe, up to the full range of the type
 - Counting sort when the range is narrow
+- Hash-table counting when the values are few but far apart
 
 ### 3. Memory Management
 - Single contiguous allocation for the scratch buffer and bucket bookkeeping
@@ -153,12 +250,19 @@ AHB Sort is built on the foundation of bucket sort but incorporates several opti
 ### 4. Distribution Techniques
 - Shift-based bucket indexing
 - Unrolled counting loop
-- Bucket count scaled to the array size and to how the sample is spread
+- Bucket count chosen from the array size, the sample, and what fits in the cache
 
 ### 5. Sorting Strategy
 - Adaptive threshold between recursion and insertion sort
 - Single final insertion pass when every bucket is small
 - Guaranteed progress at every recursion level
+
+### Tried and Not Adopted
+These were measured in `experiments/` and did not help on the test machine:
+- Software write combining (buffering each bucket's elements and copying them in blocks): 10-16% slower on wide uniform data at 3M to 5M elements
+- One scratch buffer shared across the recursion: no measurable difference
+- Trying an insertion sort with a limited number of moves before anything else: slower on every input tested, including nearly sorted ones
+- A variance-based bucket count (the original design): slower than a fixed n / 2
 
 ## Implementation Details 🛠️
 
@@ -199,8 +303,10 @@ make variants   # timing comparison of experimental variants (see experiments/)
 ## Future Improvements 🔮
 
 Potential areas for further optimization:
-- Closing the rest of the gap to radix sort on wide ranges, especially skewed data such as the exponential input, which the sample test does not help. Capping the buckets per level and sharing one scratch buffer across the recursion were both tried in `experiments/` and did not help.
-- Checking the evenly-spread settings on x86 and other cache sizes
+- Closing the rest of the gap to radix sort on wide 32-bit ranges
+- Choosing the bucket limits from the machine's cache sizes instead of fixed array sizes, and checking them on x86
+- Splitting skewed data by sampled quantiles instead of equal-width buckets
+- Stronger baselines in the benchmark: a tuned radix sort and an inlined comparison sort
 - Sorting records by an integer key
 - SIMD operations integration
 - Parallel processing support

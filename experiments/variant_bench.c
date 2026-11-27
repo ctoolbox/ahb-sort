@@ -40,32 +40,37 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 
 // ---- Variants --------------------------------------------------------------
 //
-// "current" is the algorithm in ahb_sort.h expressed through the template:
-// counting when range <= 2n, power-of-two widths, n / 2 buckets.
+// "current" is the algorithm in ahb_sort.h expressed through the template.
+// The others:
+//
+//   sampled   the header before sparse counting, the spread-aware counting
+//             limit and the bucket caps were added
+//   no_caps   current without the bucket caps for large arrays
+//   early     the first version of the caps: from 2^18 elements for data that
+//             is not evenly spread, with weaker guards and a 1024-slot sparse
+//             table. Fast on the inputs below, but up to 3x slower than
+//             "sampled" on other shapes (two clusters, sorted runs).
+//   wc16      current with software write combining in the capped scatter
 
 #define AHB_FN v_current
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
-#include "ahb_variant.inc"
-
-#define AHB_FN v_compact
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
 #define AHB_OPT_COMPACT 1
-#include "ahb_variant.inc"
-
-#define AHB_FN v_a64_x2
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 1
-#define AHB_OPT_COMPACT 1
-#define AHB_OPT_BUCKET_MULT 2
+#define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
+#define AHB_OPT_SPARSE 4096
+#define AHB_OPT_COUNT_SPREAD 1
+#define AHB_OPT_CAP_SKEW 8192
+#define AHB_OPT_CAP_SKEW_AT 2097153
+#define AHB_OPT_CAP_GUARDS 2
+#define AHB_OPT_CAP_SPREAD_AT 2097152
+#define AHB_OPT_CAP_SPREAD_DIV 4096
+#define AHB_OPT_ORDERED_MIN 48
+#define AHB_OPT_ORDERED_TURNS 7
 #include "ahb_variant.inc"
 
-#define AHB_FN v_s1_a64
+#define AHB_FN v_sampled
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
@@ -74,48 +79,50 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 #define AHB_OPT_FINAL_PASS 64
 #include "ahb_variant.inc"
 
-#define AHB_FN v_s2_a64
+#define AHB_FN v_no_caps
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
 #define AHB_OPT_COMPACT 1
-#define AHB_OPT_SAMPLE 2
+#define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
+#define AHB_OPT_SPARSE 4096
+#define AHB_OPT_COUNT_SPREAD 1
 #include "ahb_variant.inc"
 
-#define AHB_FN v_s2_a16
+#define AHB_FN v_early
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
 #define AHB_OPT_COMPACT 1
-#define AHB_OPT_SAMPLE 2
-#define AHB_OPT_FINAL_PASS 16
+#define AHB_OPT_SAMPLE 1
+#define AHB_OPT_FINAL_PASS 64
+#define AHB_OPT_SPARSE 1024
+#define AHB_OPT_COUNT_SPREAD 1
+#define AHB_OPT_CAP_SKEW 8192
+#define AHB_OPT_CAP_SKEW_AT 262144
+#define AHB_OPT_CAP_GUARDS 1
+#define AHB_OPT_CAP_SPREAD_AT 2097152
+#define AHB_OPT_CAP_SPREAD_DIV 4096
 #include "ahb_variant.inc"
 
-#define AHB_FN v_s3_a64
+#define AHB_FN v_wc16
 #define AHB_OPT_COUNTING 8
 #define AHB_OPT_POW2 1
 #define AHB_OPT_DIVISOR 2
 #define AHB_OPT_COMPACT 1
-#define AHB_OPT_SAMPLE 3
+#define AHB_OPT_SAMPLE 1
 #define AHB_OPT_FINAL_PASS 64
-#include "ahb_variant.inc"
-
-#define AHB_FN v_s4_a64
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
-#define AHB_OPT_COMPACT 1
-#define AHB_OPT_SAMPLE 4
-#define AHB_OPT_FINAL_PASS 64
-#include "ahb_variant.inc"
-
-#define AHB_FN v_s2_3arr
-#define AHB_OPT_COUNTING 8
-#define AHB_OPT_POW2 1
-#define AHB_OPT_DIVISOR 2
-#define AHB_OPT_SAMPLE 2
-#define AHB_OPT_FINAL_PASS 64
+#define AHB_OPT_SPARSE 4096
+#define AHB_OPT_COUNT_SPREAD 1
+#define AHB_OPT_CAP_SKEW 8192
+#define AHB_OPT_CAP_SKEW_AT 2097153
+#define AHB_OPT_CAP_GUARDS 2
+#define AHB_OPT_CAP_SPREAD_AT 2097152
+#define AHB_OPT_CAP_SPREAD_DIV 4096
+#define AHB_OPT_ORDERED_MIN 48
+#define AHB_OPT_ORDERED_TURNS 7
+#define AHB_OPT_WC 16
 #include "ahb_variant.inc"
 
 static void header(int *arr, int size) { AHB_Sort(arr, size); }
@@ -129,14 +136,10 @@ static const struct {
 } variants[] = {
     {"header", header},
     {"current", v_current},
-    {"compact", v_compact},
-    {"a64_x2", v_a64_x2},
-    {"s1_a64", v_s1_a64},
-    {"s2_a64", v_s2_a64},
-    {"s2_a16", v_s2_a16},
-    {"s3_a64", v_s3_a64},
-    {"s4_a64", v_s4_a64},
-    {"s2_3arr", v_s2_3arr},
+    {"sampled", v_sampled},
+    {"no_caps", v_no_caps},
+    {"early", v_early},
+    {"wc16", v_wc16},
 };
 #define VARIANT_COUNT ((int)(sizeof(variants) / sizeof(variants[0])))
 
@@ -160,6 +163,7 @@ static void fill_uniform(int *arr, int size, uint32_t range) {
 static void in_uniform_1000(int *arr, int size) { fill_uniform(arr, size, 1000); }
 static void in_uniform_half_n(int *arr, int size) { fill_uniform(arr, size, (uint32_t)size / 2 + 1); }
 static void in_uniform_2n(int *arr, int size) { fill_uniform(arr, size, (uint32_t)size * 2); }
+static void in_uniform_1_2n(int *arr, int size) { fill_uniform(arr, size, (uint32_t)size / 5 * 6); }
 static void in_uniform_1e9(int *arr, int size) { fill_uniform(arr, size, 1000000000); }
 
 static void in_uniform_full(int *arr, int size) {
@@ -181,6 +185,22 @@ static void in_nearly_sorted(int *arr, int size) {
     for (int i = 0; i < size; i++) arr[i] = i + (int)(next_u32() % 10);
 }
 
+// Ascending values with 1% of the elements swapped to random places
+static void in_sorted_swapped(int *arr, int size) {
+    for (int i = 0; i < size; i++) arr[i] = i * 3;
+    for (int k = 0; k < size / 100; k++) {
+        int a = (int)(next_u32() % (uint32_t)size), b = (int)(next_u32() % (uint32_t)size);
+        int t = arr[a]; arr[a] = arr[b]; arr[b] = t;
+    }
+}
+
+// 1000 distinct values scattered over the whole int range
+static void in_thousand_distinct_wide(int *arr, int size) {
+    static int values[1000];
+    for (int i = 0; i < 1000; i++) values[i] = (int)next_u32();
+    for (int i = 0; i < size; i++) arr[i] = values[next_u32() % 1000];
+}
+
 // 100 distinct values scattered over the whole int range
 static void in_few_distinct_wide(int *arr, int size) {
     int values[100];
@@ -195,12 +215,15 @@ static const struct {
     {"uniform, range 1000", in_uniform_1000},
     {"uniform, range n/2", in_uniform_half_n},
     {"uniform, range 2n", in_uniform_2n},
+    {"uniform, range 1.2n", in_uniform_1_2n},
     {"uniform, range 1e9", in_uniform_1e9},
     {"uniform, full int", in_uniform_full},
     {"exponential", in_exponential},
     {"cluster + 1% outliers", in_cluster_outliers},
     {"nearly sorted", in_nearly_sorted},
+    {"sorted, 1% swapped", in_sorted_swapped},
     {"100 distinct, wide", in_few_distinct_wide},
+    {"1000 distinct, wide", in_thousand_distinct_wide},
 };
 #define INPUT_COUNT ((int)(sizeof(inputs) / sizeof(inputs[0])))
 

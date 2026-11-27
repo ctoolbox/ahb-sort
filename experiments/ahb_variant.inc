@@ -32,6 +32,36 @@
  *                       final pass (AHB_OPT_FINAL_PASS = M, required);
  *                       otherwise use the normal bucket count and no final
  *                       pass
+ *   AHB_OPT_COUNT_SPREAD with AHB_OPT_SAMPLE: 1 = when the sample says the
+ *                       data is evenly spread, use counting sort only up to
+ *                       range <= size (the bucket route with a final pass is
+ *                       faster above that)
+ *   AHB_OPT_SPARSE      S > 0 (a power of two) = when the sample holds a
+ *                       repeated value, try to count the distinct values in
+ *                       a hash table of S slots (gives up past 256 of them);
+ *                       needs AHB_OPT_SAMPLE
+ *   AHB_OPT_CAP_SKEW    M > 0 = at most M buckets per level for data the
+ *                       sample does not call evenly spread, at levels of at
+ *                       least AHB_OPT_CAP_SKEW_AT elements
+ *   AHB_OPT_CAP_SPREAD  M > 0 = at most M buckets per level for evenly spread
+ *                       data of more than AHB_OPT_CAP_SPREAD_AT elements
+ *   AHB_OPT_CAP_SPREAD_DIV  D > 0 = size / D buckets for evenly spread data
+ *                       of more than AHB_OPT_CAP_SPREAD_AT elements
+ *   AHB_OPT_ORDERED_MIN    how many of the sample comparisons must agree for
+ *                          the array to count as ordered (default 56).
+ *   AHB_OPT_ORDERED_TURNS  also count the array as ordered when the samples
+ *                          change direction at most this many times (0 = off).
+ *   AHB_OPT_CAP_GUARDS  1 = no cap when the sample is already in order, and
+ *                       no AHB_OPT_CAP_SKEW cap when the middle half of the
+ *                       sample would fit in one capped bucket;
+ *                       2 = no cap when the sample is in order or the array
+ *                       is made of sorted runs, and no AHB_OPT_CAP_SKEW cap
+ *                       when the sample falls into fewer than 32 capped
+ *                       buckets or the sparse attempt got more than half way
+ *   AHB_OPT_WC          B > 0 = at levels with at most 4096 buckets and at
+ *                       least 262144 elements, scatter
+ *                       through per-bucket buffers of B elements that are
+ *                       flushed with one copy (software write combining)
  *   AHB_OPT_COMPACT     0 = three bookkeeping arrays per level (offsets,
  *                       sizes, write positions); 1 = a single array
  *
@@ -71,6 +101,43 @@
 #endif
 #ifndef AHB_OPT_SAMPLE
 #define AHB_OPT_SAMPLE 0
+#endif
+#ifndef AHB_OPT_COUNT_SPREAD
+#define AHB_OPT_COUNT_SPREAD 0
+#endif
+#ifndef AHB_OPT_SPARSE
+#define AHB_OPT_SPARSE 0
+#endif
+#ifndef AHB_OPT_CAP_SKEW
+#define AHB_OPT_CAP_SKEW 0
+#endif
+#ifndef AHB_OPT_CAP_SPREAD
+#define AHB_OPT_CAP_SPREAD 0
+#endif
+#ifndef AHB_OPT_CAP_SPREAD_AT
+#define AHB_OPT_CAP_SPREAD_AT 0
+#endif
+#ifndef AHB_OPT_CAP_SKEW_AT
+#define AHB_OPT_CAP_SKEW_AT 0
+#endif
+#ifndef AHB_OPT_CAP_SPREAD_DIV
+#define AHB_OPT_CAP_SPREAD_DIV 0
+#endif
+#ifndef AHB_OPT_ORDERED_MIN
+#define AHB_OPT_ORDERED_MIN 56
+#endif
+#ifndef AHB_OPT_ORDERED_TURNS
+#define AHB_OPT_ORDERED_TURNS 0
+#endif
+#ifndef AHB_OPT_CAP_GUARDS
+#define AHB_OPT_CAP_GUARDS 0
+#endif
+#ifndef AHB_OPT_WC
+#define AHB_OPT_WC 0
+#endif
+
+#if AHB_OPT_SPARSE && AHB_OPT_SPARSE < 512
+#error "AHB_OPT_SPARSE is the hash table size: a power of two, at least 512"
 #endif
 
 #if AHB_OPT_COMPACT
@@ -162,9 +229,71 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
 
     const uint32_t min_u = (uint32_t)min_value;
 
+#if AHB_OPT_SAMPLE
+    // Decide from a small sample whether the values are spread out evenly,
+    // and whether any value repeats.
+    // ordered: the array is close to sorted or made of sorted runs. Either
+    // at least 56 of the 63 neighbouring samples are in ascending order (or
+    // 56 in descending order), or, with AHB_OPT_CAP_GUARDS = 2, at least 56
+    // of the 64 samples are in order with the element right after them.
+    // bulk: the width of the middle half of the sample.
+    int sample[64];
+    int spread = 0, repeats = 0, ordered = 0;
+    uint32_t bulk = 0;
+    if (size >= 1024) {
+        int bins[8] = {0};
+        int step = size / 64;
+        int rising = 0, falling = 0, steps_up = 0, steps_down = 0;
+        for (int k = 0; k < 64; k++) {
+            int value = arr[k * step], next = arr[k * step + 1];
+            sample[k] = value;
+            bins[(int)(((uint64_t)((uint32_t)value - min_u) * 8) / (uint64_t)range)]++;
+            if (next >= value) steps_up++;
+            if (next <= value) steps_down++;
+        }
+        for (int k = 1; k < 64; k++) {
+            if (sample[k] >= sample[k - 1]) rising++;
+            if (sample[k] <= sample[k - 1]) falling++;
+        }
+        (void)steps_up; (void)steps_down;
+        ordered = rising >= AHB_OPT_ORDERED_MIN || falling >= AHB_OPT_ORDERED_MIN;
+#if AHB_OPT_CAP_GUARDS == 2
+        ordered = ordered || steps_up >= AHB_OPT_ORDERED_MIN || steps_down >= AHB_OPT_ORDERED_MIN;
+#endif
+#if AHB_OPT_ORDERED_TURNS
+        {
+            // Long rising and falling stretches (organ pipe, a few big runs):
+            // the samples change direction only a few times.
+            int turns = 0, direction = 0;
+            for (int k = 1; k < 64; k++) {
+                int d = (sample[k] > sample[k - 1]) - (sample[k] < sample[k - 1]);
+                if (d && direction && d != direction) turns++;
+                if (d) direction = d;
+            }
+            ordered = ordered || turns <= AHB_OPT_ORDERED_TURNS;
+        }
+#endif
+        ahbv_insertion_sort(sample, 64);
+        for (int k = 1; k < 64; k++) {
+            if (sample[k] == sample[k - 1]) repeats = 1;
+        }
+        spread = !repeats;
+        for (int k = 0; k < 8; k++) {
+            if (bins[k] < 3) spread = 0;
+        }
+        bulk = (uint32_t)sample[47] - (uint32_t)sample[16];
+    }
+    (void)sample;
+    (void)repeats; (void)ordered; (void)bulk;
+#endif
+
 #if AHB_OPT_COUNTING
     // Narrow range: count each value and write the values straight back.
+#if AHB_OPT_COUNT_SPREAD
+    if (range <= (int64_t)size * (spread ? 4 : AHB_OPT_COUNTING) / 4) {
+#else
     if (range <= (int64_t)size * AHB_OPT_COUNTING / 4) {
+#endif
         int *counts = calloc((size_t)range, sizeof(int));
         if (counts) {
             for (i = 0; i < size; i++) counts[(uint32_t)arr[i] - min_u]++;
@@ -179,31 +308,85 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
     }
 #endif
 
-#if AHB_OPT_SAMPLE
-    // Decide from a small sample whether the values are spread out evenly.
-    int spread = 0;
-    if (size >= 1024) {
-        int sample[64];
-        int bins[8] = {0};
-        int step = size / 64;
-        for (int k = 0; k < 64; k++) {
-            int value = arr[k * step];
-            sample[k] = value;
-            bins[(int)(((uint64_t)((uint32_t)value - min_u) * 8) / (uint64_t)range)]++;
+#if AHB_OPT_SPARSE
+    // Few distinct values: count them in a small hash table, sort the
+    // distinct values, and write each back as many times as it occurred.
+    int sparse_scanned = 0;
+    (void)sparse_scanned;
+    if (repeats) {
+        enum { SLOTS = AHB_OPT_SPARSE, MAX_DISTINCT = 256 };
+        int keys[SLOTS];
+        uint32_t counts[SLOTS];
+        int distinct[MAX_DISTINCT];
+        int distinct_count = 0;
+        memset(counts, 0, sizeof counts);
+        for (i = 0; i < size; i++) {
+            int value = arr[i];
+            uint32_t slot = (uint32_t)(((uint64_t)(uint32_t)value * 0x9E3779B97F4A7C15ULL) >> 40) & (SLOTS - 1);
+            while (counts[slot] && keys[slot] != value) slot = (slot + 1) & (SLOTS - 1);
+            if (!counts[slot]) {
+                if (distinct_count == MAX_DISTINCT) break;
+                keys[slot] = value;
+                distinct[distinct_count++] = value;
+            }
+            counts[slot]++;
         }
-        ahbv_insertion_sort(sample, 64);
-        spread = 1;
-        for (int k = 1; k < 64; k++) {
-            if (sample[k] == sample[k - 1]) spread = 0;
+        if (i == size) {
+            ahbv_insertion_sort(distinct, distinct_count);
+            int *out = arr;
+            for (int d = 0; d < distinct_count; d++) {
+                int value = distinct[d];
+                uint32_t slot = (uint32_t)(((uint64_t)(uint32_t)value * 0x9E3779B97F4A7C15ULL) >> 40) & (SLOTS - 1);
+                while (keys[slot] != value) slot = (slot + 1) & (SLOTS - 1);
+                for (uint32_t c = counts[slot]; c > 0; c--) *out++ = value;
+            }
+            return;
         }
-        for (int k = 0; k < 8; k++) {
-            if (bins[k] < 3) spread = 0;
-        }
+        sparse_scanned = i;
     }
+#endif
+
+#if AHB_OPT_SAMPLE
     if (spread) {
         int64_t wanted = (int64_t)size * AHB_OPT_SAMPLE;
         bucket_count = wanted > INT32_MAX / 2 ? INT32_MAX / 2 : (int)wanted;
     }
+#if AHB_OPT_CAP_GUARDS == 2
+    // A cap only pays if the data really spreads over the buckets: not when
+    // the array is nearly sorted, when the sample falls into fewer than 32
+    // of the capped buckets, or when the sparse attempt got through more
+    // than half the array before giving up.
+    int occupied = 1;
+    {
+        int64_t wide = (range - 1) / (AHB_OPT_CAP_SKEW ? AHB_OPT_CAP_SKEW : 1) + 1;
+        for (int k = 1; k < 64; k++) {
+            if (((uint32_t)sample[k] - min_u) / wide != ((uint32_t)sample[k - 1] - min_u) / wide) occupied++;
+        }
+    }
+    const int skew_cap_ok = !ordered && occupied >= 32 && sparse_scanned <= size / 2;
+    const int spread_cap_ok = !ordered;
+#elif AHB_OPT_CAP_GUARDS
+    // A cap only pays if it splits the bulk of the data over many buckets,
+    // and nearly sorted data needs no cap at all.
+    const int skew_cap_ok = !ordered && (int64_t)bulk >= (range - 1) / (AHB_OPT_CAP_SKEW ? AHB_OPT_CAP_SKEW : 1) + 1;
+    const int spread_cap_ok = !ordered;
+#else
+    const int skew_cap_ok = 1, spread_cap_ok = 1;
+#endif
+    (void)skew_cap_ok; (void)spread_cap_ok;
+#if AHB_OPT_CAP_SKEW
+    if (!spread && skew_cap_ok && size >= AHB_OPT_CAP_SKEW_AT && bucket_count > AHB_OPT_CAP_SKEW) {
+        bucket_count = AHB_OPT_CAP_SKEW;
+    }
+#endif
+#if AHB_OPT_CAP_SPREAD
+    if (spread && spread_cap_ok && size > AHB_OPT_CAP_SPREAD_AT && bucket_count > AHB_OPT_CAP_SPREAD) {
+        bucket_count = AHB_OPT_CAP_SPREAD;
+    }
+#endif
+#if AHB_OPT_CAP_SPREAD_DIV
+    if (spread && spread_cap_ok && size > AHB_OPT_CAP_SPREAD_AT) bucket_count = size / AHB_OPT_CAP_SPREAD_DIV;
+#endif
 #endif
 
     int64_t bucket_size = (range - 1) / bucket_count + 1;
@@ -285,6 +468,34 @@ static void AHBV_REC(int *arr, int *scratch, int size) {
         running_total += bsize;
     }
 
+#if AHB_OPT_WC
+    // Software write combining: collect AHB_OPT_WC elements per bucket in a
+    // small buffer and move them to the bucket with one copy.
+    int *wc = NULL;
+    if (bucket_count <= 4096 && size >= 262144) {
+        wc = malloc((size_t)bucket_count * (AHB_OPT_WC + 1) * sizeof(int));
+    }
+    if (wc) {
+        int *fill = wc + (size_t)bucket_count * AHB_OPT_WC;
+        memset(fill, 0, (size_t)bucket_count * sizeof(int));
+        for (i = 0; i < size; i++) {
+            int value = arr[i];
+            int b = AHBV_INDEX(value);
+            int *block = wc + (size_t)b * AHB_OPT_WC;
+            block[fill[b]++] = value;
+            if (fill[b] == AHB_OPT_WC) {
+                memcpy(&buckets[positions[b]], block, AHB_OPT_WC * sizeof(int));
+                positions[b] += AHB_OPT_WC;
+                fill[b] = 0;
+            }
+        }
+        for (i = 0; i < bucket_count; i++) {
+            memcpy(&buckets[positions[i]], wc + (size_t)i * AHB_OPT_WC, (size_t)fill[i] * sizeof(int));
+            positions[i] += fill[i];
+        }
+        free(wc);
+    } else
+#endif
     for (i = 0; i < size; i++) buckets[positions[AHBV_INDEX(arr[i])]++] = arr[i];
 
     int threshold = size < 1024 ? size / 16 : AHB_OPT_THRESHOLD;
@@ -368,6 +579,17 @@ static void AHB_FN(int *arr, int size) {
 #undef AHB_OPT_FINAL_PASS
 #undef AHB_OPT_COMPACT
 #undef AHB_OPT_SAMPLE
+#undef AHB_OPT_COUNT_SPREAD
+#undef AHB_OPT_SPARSE
+#undef AHB_OPT_CAP_SKEW
+#undef AHB_OPT_CAP_SPREAD
+#undef AHB_OPT_CAP_SPREAD_AT
+#undef AHB_OPT_CAP_SKEW_AT
+#undef AHB_OPT_CAP_SPREAD_DIV
+#undef AHB_OPT_CAP_GUARDS
+#undef AHB_OPT_ORDERED_MIN
+#undef AHB_OPT_ORDERED_TURNS
+#undef AHB_OPT_WC
 #undef AHBV_ARRAYS
 #undef AHBV_REC
 #undef AHBV_CAT

@@ -2,8 +2,9 @@
 // for all four element types.
 // Build and run with `make test` (uses AddressSanitizer + UBSan).
 //
-// Three groups of checks: fixed patterns at fixed sizes, randomly shaped
-// inputs, and runs where chosen allocations inside the sort are made to fail.
+// Four groups of checks: fixed patterns at fixed sizes, a subset of them on
+// large arrays, randomly shaped inputs, and runs where chosen allocations
+// inside the sort are made to fail.
 //
 // Test inputs are generated as 64-bit offsets from the smallest value of the
 // element type. Offset order is the same as element order for every type, so
@@ -148,6 +149,85 @@ static void pat_powers_of_two(uint64_t *out, size_t count, uint64_t top) {
     for (size_t i = 0; i < count; i++) out[i] = (uint64_t)1 << (next_u64() % bits);
 }
 
+// 1000 distinct values over the whole range: repeats show up in the sort's
+// sample, but there are too many distinct values for its sparse path
+static void pat_thousand_distinct(uint64_t *out, size_t count, uint64_t top) {
+    static uint64_t values[1000];
+    for (size_t i = 0; i < 1000; i++) values[i] = next_u64() & top;
+    for (size_t i = 0; i < count; i++) out[i] = values[next_u64() % 1000];
+}
+
+// Wide but heavily skewed towards the bottom of the range
+static void pat_skewed(uint64_t *out, size_t count, uint64_t top) {
+    for (size_t i = 0; i < count; i++) out[i] = (next_u64() & top) >> (next_u64() % 24);
+}
+
+// 99% of the values in a block of 1000, the rest anywhere
+static void pat_tight_cluster(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t middle = top / 2 + 1;
+    for (size_t i = 0; i < count; i++) {
+        out[i] = next_u64() % 100 == 0 ? (next_u64() & top) : middle + next_u64() % 1000;
+    }
+}
+
+// Ascending and widely spaced, with 1% of the elements swapped at random
+static void pat_sorted_with_swaps(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t gap = count ? top / count : 1;
+    for (size_t i = 0; i < count; i++) out[i] = i * gap;
+    for (size_t k = 0; k < count / 100; k++) {
+        size_t a = next_u64() % count, b = next_u64() % count;
+        uint64_t t = out[a];
+        out[a] = out[b];
+        out[b] = t;
+    }
+}
+
+// Ascending runs of 4096 elements, each starting at a random value
+static void pat_sorted_runs(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t base = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (i % 4096 == 0) base = next_u64() & (top / 2);
+        out[i] = base + (i % 4096) * 16;
+    }
+}
+
+// Rising over the first half and falling over the second
+static void pat_organ_pipe(uint64_t *out, size_t count, uint64_t top) {
+    const uint64_t scale = top / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = (i < count / 2 ? i : count - i) * scale;
+}
+
+// Ascending, with every tenth element replaced by a random value
+static void pat_sorted_tenth_random(uint64_t *out, size_t count, uint64_t top) {
+    const uint64_t scale = top / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = i % 10 == 3 ? next_u64() & top : i * scale;
+}
+
+// Ascending and bunched towards the bottom of the range, with 1% of the
+// elements swapped at random
+static void pat_sorted_skewed_with_swaps(uint64_t *out, size_t count, uint64_t top) {
+    for (size_t i = 0; i < count; i++) {
+        double x = (double)(i + 1) / (double)(count + 1);
+        out[i] = (uint64_t)(x * x * x * x * (double)(top / 2));
+    }
+    for (size_t k = 0; k < count / 100; k++) {
+        size_t a = next_u64() % count, b = next_u64() % count;
+        uint64_t t = out[a];
+        out[a] = out[b];
+        out[b] = t;
+    }
+}
+
+// 200 distinct values, then 2% of unrelated values at the very end: the
+// sort's sparse path gets almost all the way through before giving up
+static void pat_late_surprise(uint64_t *out, size_t count, uint64_t top) {
+    uint64_t values[200];
+    for (size_t i = 0; i < 200; i++) values[i] = next_u64() & top;
+    for (size_t i = 0; i < count; i++) {
+        out[i] = i < count - count / 50 ? values[next_u64() % 200] : (next_u64() & top);
+    }
+}
+
 static void pat_all_equal(uint64_t *out, size_t count, uint64_t top) {
     for (size_t i = 0; i < count; i++) out[i] = top / 2 + 43;
 }
@@ -202,6 +282,15 @@ static const struct {
     {"powers of two", pat_powers_of_two},
     {"cluster hidden from sample", pat_cluster_hidden_from_sample},
     {"all equal", pat_all_equal},
+    {"1000 distinct", pat_thousand_distinct},
+    {"skewed", pat_skewed},
+    {"tight cluster", pat_tight_cluster},
+    {"sorted with swaps", pat_sorted_with_swaps},
+    {"sorted runs", pat_sorted_runs},
+    {"organ pipe", pat_organ_pipe},
+    {"sorted, every tenth random", pat_sorted_tenth_random},
+    {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
+    {"late surprise", pat_late_surprise},
     {"already sorted", pat_sorted},
     {"reversed", pat_reversed},
     {"nearly sorted", pat_nearly_sorted},
@@ -211,6 +300,31 @@ static const struct {
 
 static const size_t counts[] = {0, 1, 2, 3, 15, 16, 17, 18, 19, 20, 33, 100,
                                 1000, 1023, 1024, 1025, 10000, 200000};
+
+// Arrays of more than 2^21 elements switch to fewer, larger buckets, so these
+// patterns also run at sizes below and above that limit.
+static const struct {
+    const char *name;
+    pattern fill;
+} large_patterns[] = {
+    {"full range", pat_full_range},
+    {"upper half", pat_upper_half},
+    {"1000 distinct", pat_thousand_distinct},
+    {"skewed", pat_skewed},
+    {"tight cluster", pat_tight_cluster},
+    {"sorted with swaps", pat_sorted_with_swaps},
+    {"sorted runs", pat_sorted_runs},
+    {"organ pipe", pat_organ_pipe},
+    {"sorted, every tenth random", pat_sorted_tenth_random},
+    {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
+    {"late surprise", pat_late_surprise},
+    {"nearly sorted", pat_nearly_sorted},
+    {"cluster hidden from sample", pat_cluster_hidden_from_sample},
+    {"range == 2 * count", pat_range_twice_count},
+    {"extremes", pat_extremes},
+};
+
+static const size_t large_counts[] = {300000, 2500000};
 
 // ---- Per-type checks -------------------------------------------------------
 
@@ -284,6 +398,7 @@ static const pattern allocation_patterns[] = {
     pat_full_range,
     pat_cluster_with_outlier,
     pat_powers_of_two,
+    pat_thousand_distinct,
 };
 
 // AHB_Sort(int *, int) is the original entry point; check it still works,
@@ -332,6 +447,34 @@ int main(void) {
                 if (!types[t].check(offsets, sorted, count)) {
                     failures++;
                     printf("FAIL: %s, %s, count %zu\n", types[t].name, patterns[p].name, count);
+                }
+
+                free(offsets);
+                free(sorted);
+            }
+        }
+    }
+
+    // Large arrays
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        for (size_t p = 0; p < sizeof(large_patterns) / sizeof(large_patterns[0]); p++) {
+            for (size_t c = 0; c < sizeof(large_counts) / sizeof(large_counts[0]); c++) {
+                size_t count = large_counts[c];
+                size_t bytes = count * sizeof(uint64_t);
+                uint64_t *offsets = malloc(bytes), *sorted = malloc(bytes);
+                if (!offsets || !sorted) {
+                    fprintf(stderr, "out of memory\n");
+                    return 2;
+                }
+
+                large_patterns[p].fill(offsets, count, types[t].top);
+                memcpy(sorted, offsets, bytes);
+                qsort(sorted, count, sizeof(uint64_t), compare_u64);
+
+                checks++;
+                if (!types[t].check(offsets, sorted, count)) {
+                    failures++;
+                    printf("FAIL: %s, %s, count %zu\n", types[t].name, large_patterns[p].name, count);
                 }
 
                 free(offsets);
