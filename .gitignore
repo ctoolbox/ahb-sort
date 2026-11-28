@@ -4,6 +4,9 @@ release/
 build/
 dist/
 
+# Downloaded by `make baselines`
+experiments/third_party/
+
 # Object files
 *.o
 *.ko

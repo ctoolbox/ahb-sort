@@ -191,6 +191,44 @@ static void pat_sorted_runs(uint64_t *out, size_t count, uint64_t top) {
     }
 }
 
+// Wide, skewed towards the bottom, and at most 30 bits whatever the type:
+// the product of two random 15-bit numbers
+static void pat_skewed_30_bits(uint64_t *out, size_t count, uint64_t top) {
+    (void)top;
+    for (size_t i = 0; i < count; i++) out[i] = (next_u64() & 0x7FFF) * (next_u64() & 0x7FFF);
+}
+
+// Random 30-bit values with the low 11 bits clear
+static void pat_low_bits_clear(uint64_t *out, size_t count, uint64_t top) {
+    (void)top;
+    for (size_t i = 0; i < count; i++) out[i] = next_u64() & 0x3FFFF800;
+}
+
+// Even positions rise and odd positions fall, over the same 30-bit range
+static void pat_interleaved_up_down(uint64_t *out, size_t count, uint64_t top) {
+    (void)top;
+    const uint64_t scale = 0x3FFFFFFF / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = (i & 1) ? (count - i) * scale : i * scale;
+}
+
+// Three rising sequences taking turns, each in its own third of 30 bits
+static void pat_three_rising(uint64_t *out, size_t count, uint64_t top) {
+    (void)top;
+    const uint64_t third = 0x3FFFFFFF / 3, scale = third / (count + 1);
+    for (size_t i = 0; i < count; i++) out[i] = (i % 3) * third + i * scale;
+}
+
+// A zigzag: eight rising and eight falling stretches over 30 bits
+static void pat_zigzag(uint64_t *out, size_t count, uint64_t top) {
+    (void)top;
+    const size_t stretch = count / 16 + 1;
+    const uint64_t scale = 0x3FFFFFFF / stretch;
+    for (size_t i = 0; i < count; i++) {
+        size_t place = i % stretch;
+        out[i] = ((i / stretch) & 1 ? stretch - place : place) * scale;
+    }
+}
+
 // Rising over the first half and falling over the second
 static void pat_organ_pipe(uint64_t *out, size_t count, uint64_t top) {
     const uint64_t scale = top / (count + 1);
@@ -289,6 +327,11 @@ static const struct {
     {"sorted runs", pat_sorted_runs},
     {"organ pipe", pat_organ_pipe},
     {"sorted, every tenth random", pat_sorted_tenth_random},
+    {"skewed, 30 bits", pat_skewed_30_bits},
+    {"low bits clear", pat_low_bits_clear},
+    {"interleaved up and down", pat_interleaved_up_down},
+    {"three rising sequences", pat_three_rising},
+    {"zigzag", pat_zigzag},
     {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
     {"late surprise", pat_late_surprise},
     {"already sorted", pat_sorted},
@@ -316,6 +359,11 @@ static const struct {
     {"sorted runs", pat_sorted_runs},
     {"organ pipe", pat_organ_pipe},
     {"sorted, every tenth random", pat_sorted_tenth_random},
+    {"skewed, 30 bits", pat_skewed_30_bits},
+    {"low bits clear", pat_low_bits_clear},
+    {"interleaved up and down", pat_interleaved_up_down},
+    {"three rising sequences", pat_three_rising},
+    {"zigzag", pat_zigzag},
     {"sorted, skewed, with swaps", pat_sorted_skewed_with_swaps},
     {"late surprise", pat_late_surprise},
     {"nearly sorted", pat_nearly_sorted},
@@ -399,6 +447,7 @@ static const pattern allocation_patterns[] = {
     pat_cluster_with_outlier,
     pat_powers_of_two,
     pat_thousand_distinct,
+    pat_skewed_30_bits,
 };
 
 // AHB_Sort(int *, int) is the original entry point; check it still works,

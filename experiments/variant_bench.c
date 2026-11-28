@@ -40,7 +40,9 @@ static int ahbv_compare_ints(const void *a, const void *b) {
 
 // ---- Variants --------------------------------------------------------------
 //
-// "current" is the algorithm in ahb_sort.h expressed through the template.
+// "current" is the bucket route of ahb_sort.h expressed through the template.
+// It does not include the header's radix route for wide, unstructured data,
+// so "header" is much faster than "current" on the wide inputs below.
 // The others:
 //
 //   sampled   the header before sparse counting, the spread-aware counting

@@ -90,6 +90,14 @@ static inline void AHB_Sort(int *arr, int size) {
 #define AHB_INSERTION_FN AHB_CONCAT(ahb_insertion_sort_, AHB_SUFFIX)
 #define AHB_COMPARE_FN AHB_CONCAT(ahb_compare_, AHB_SUFFIX)
 #define AHB_SPARSE_FN AHB_CONCAT(ahb_sparse_sort_, AHB_SUFFIX)
+#define AHB_RADIX_FN AHB_CONCAT(ahb_radix_sort_, AHB_SUFFIX)
+
+/* Radix sort: at most three passes of at most 11 bits. Evenly spread data
+ * goes that way only from 65536 elements; below that, one bucket per element
+ * and a final insertion pass are faster. */
+#define AHB_RADIX_DIGIT 11
+#define AHB_RADIX_MAX_PASSES 3
+#define AHB_RADIX_SPREAD_MIN ((size_t)65536)
 
 /* Slot of a value in the 4096-slot table of the sparse sort */
 #define AHB_HASH(x) ((size_t)(((uint64_t)(AHB_U)(x) * 0x9E3779B97F4A7C15ULL) >> 52))
@@ -167,6 +175,67 @@ static int AHB_SPARSE_FN(AHB_T *arr, size_t count, size_t *scanned) {
     *scanned = i;
     free(memory);
     return sorted;
+}
+
+/* LSD radix sort for wide data: sorts on (value - min_u), which fits in
+ * `bits` bits, in passes of equal width of at most AHB_RADIX_DIGIT bits. All
+ * the digit counts are gathered in one pass over the data, and a pass in
+ * which every element has the same digit is skipped. Returns 0 without
+ * touching the array if the scratch space cannot be allocated. */
+static int AHB_RADIX_FN(AHB_T *arr, size_t count, AHB_U min_u, unsigned bits) {
+    const unsigned passes = (bits + AHB_RADIX_DIGIT - 1) / AHB_RADIX_DIGIT;
+    const unsigned digit = (bits + passes - 1) / passes;
+    const size_t table = (size_t)1 << digit;
+    const AHB_U mask = (AHB_U)(table - 1);
+    char *memory = (char *)malloc(count * sizeof(AHB_T) + passes * table * sizeof(uint32_t));
+    if (!memory) return 0;
+    AHB_T *source = arr, *target = (AHB_T *)memory;
+    uint32_t *counts = (uint32_t *)(memory + count * sizeof(AHB_T));
+    memset(counts, 0, passes * table * sizeof(uint32_t));
+    size_t i;
+    unsigned p;
+    if (passes == 3) {
+        uint32_t *c0 = counts, *c1 = counts + table, *c2 = counts + 2 * table;
+        for (i = 0; i < count; i++) {
+            AHB_U key = (AHB_U)arr[i] - min_u;
+            c0[key & mask]++;
+            c1[(key >> digit) & mask]++;
+            c2[(key >> (2 * digit)) & mask]++;
+        }
+    } else if (passes == 2) {
+        uint32_t *c0 = counts, *c1 = counts + table;
+        for (i = 0; i < count; i++) {
+            AHB_U key = (AHB_U)arr[i] - min_u;
+            c0[key & mask]++;
+            c1[(key >> digit) & mask]++;
+        }
+    } else {
+        for (i = 0; i < count; i++) {
+            AHB_U key = (AHB_U)arr[i] - min_u;
+            for (p = 0; p < passes; p++) counts[p * table + ((key >> (p * digit)) & mask)]++;
+        }
+    }
+    for (p = 0; p < passes; p++) {
+        uint32_t *c = counts + p * table;
+        const unsigned shift = p * digit;
+        if (c[(((AHB_U)source[0] - min_u) >> shift) & mask] == count) continue;
+        uint32_t total = 0;
+        for (size_t b = 0; b < table; b++) {
+            uint32_t n = c[b];
+            c[b] = total;
+            total += n;
+        }
+        for (i = 0; i < count; i++) {
+            AHB_T value = source[i];
+            target[c[(((AHB_U)value - min_u) >> shift) & mask]++] = value;
+        }
+        AHB_T *swap = source;
+        source = target;
+        target = swap;
+    }
+    if (source != arr) memcpy(arr, source, count * sizeof(AHB_T));
+    free(memory);
+    return 1;
 }
 
 /* Main sorting function */
@@ -277,6 +346,99 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
     /* Wide range but repeated values in the sample: try the sparse sort */
     size_t sparse_scanned = 0;
     if (repeats && AHB_SPARSE_FN(arr, count, &sparse_scanned)) return;
+
+    /* Wide data with no sign of order or repetition is radix sorted. Order
+     * matters because elements that arrive in sequence make the bucket route
+     * below two to three times faster than a radix sort, so before choosing
+     * the radix sort, look harder for reasons to keep the buckets.
+     *
+     * Local order first: in 64 windows of four consecutive elements, count
+     * how far the number of inversions (0 to 6) is from the 3 that random
+     * data averages. Random data scores about 75 in total, monotone
+     * stretches 192. */
+    int keep_buckets = 0;
+    if (count >= 1024 && !repeats && !ordered) {
+        const size_t step = count / 64;
+        unsigned score = 0, even_up = 0, odd_up = 0;
+        for (i = 0; i < 64; i++) {
+            const AHB_T *w = arr + i * step;
+            int inversions = (w[0] > w[1]) + (w[0] > w[2]) + (w[0] > w[3]) + (w[1] > w[2]) + (w[1] > w[3]) + (w[2] > w[3]);
+            score += (unsigned)(inversions > 3 ? inversions - 3 : 3 - inversions);
+            if ((i * step) & 1) {
+                odd_up += w[0] < w[2];
+                even_up += w[1] < w[3];
+            } else {
+                even_up += w[0] < w[2];
+                odd_up += w[1] < w[3];
+            }
+        }
+        if (score >= 120) keep_buckets = 1;
+        /* Two interleaved sequences, each rising or falling */
+        if ((even_up >= 48 || even_up <= 16) && (odd_up >= 48 || odd_up <= 16)) keep_buckets = 1;
+
+        /* A few interleaved rising (or falling) sequences: samples that are
+         * neighbours in value are then also in order of position. */
+        if (!keep_buckets) {
+            unsigned char order[64];
+            unsigned forward = 0, backward = 0;
+            for (i = 0; i < 64; i++) {
+                AHB_T value = arr[i * step];
+                size_t j = i;
+                while (j > 0 && arr[order[j - 1] * step] > value) {
+                    order[j] = order[j - 1];
+                    j--;
+                }
+                order[j] = (unsigned char)i;
+            }
+            for (i = 1; i < 64; i++) {
+                if (order[i] > order[i - 1]) forward++;
+                else backward++;
+            }
+            if (forward >= 48 || backward >= 48) keep_buckets = 1;
+        }
+
+        /* Data packed into a few clusters is better served by buckets */
+        if (!keep_buckets) {
+            const AHB_U cell = span / 8192 + 1;
+            unsigned occupied = 1;
+            for (i = 1; i < 64; i++) {
+                if (((AHB_U)sample[i] - min_u) / cell != ((AHB_U)sample[i - 1] - min_u) / cell) occupied++;
+            }
+            if (occupied < 32) keep_buckets = 1;
+        }
+
+        /* The middle half of the sample spans fewer values than an eighth
+         * of the element count: the bulk of the data is dense, and buckets
+         * followed by counting handle that better */
+        if ((AHB_U)sample[47] - (AHB_U)sample[16] < (AHB_U)(count / 8)) keep_buckets = 1;
+
+        /* A few thousand distinct values slip past 64 samples. On a large
+         * array, look for repeats among 256 more. */
+        if (!keep_buckets && count >= 65536) {
+            AHB_T more[256];
+            const size_t wide_step = count / 256;
+            for (i = 0; i < 256; i++) {
+                AHB_T value = arr[i * wide_step + wide_step / 2];
+                size_t j = i;
+                while (j > 0 && more[j - 1] > value) {
+                    more[j] = more[j - 1];
+                    j--;
+                }
+                more[j] = value;
+            }
+            for (i = 1; i < 256; i++) {
+                if (more[i] == more[i - 1]) keep_buckets = 1;
+            }
+        }
+    }
+
+    /* The radix sort handles ranges of up to 33 bits. Anything wider goes
+     * through the buckets, whose recursive calls get narrower ranges. */
+    if (count >= (spread ? AHB_RADIX_SPREAD_MIN : (size_t)1024) && !repeats && !ordered && !keep_buckets) {
+        unsigned bits = 1;
+        while (bits < sizeof(AHB_U) * 8 && (span >> bits) != 0) bits++;
+        if (bits <= AHB_RADIX_MAX_PASSES * AHB_RADIX_DIGIT && AHB_RADIX_FN(arr, count, min_u, bits)) return;
+    }
 
     /* Choose how many buckets to aim for.
      *
@@ -421,7 +583,11 @@ static inline void AHB_SORT_FN(AHB_T *arr, size_t count) {
 
 #undef AHB_BUCKET_OF
 #undef AHB_HASH
+#undef AHB_RADIX_DIGIT
+#undef AHB_RADIX_MAX_PASSES
+#undef AHB_RADIX_SPREAD_MIN
 #undef AHB_SPARSE_FN
+#undef AHB_RADIX_FN
 #undef AHB_COMPARE_FN
 #undef AHB_INSERTION_FN
 #undef AHB_SORT_FN
